@@ -1,6 +1,8 @@
+import io
 import json
 import logging
 import os
+import tarfile
 import threading
 import time
 from collections import Counter, defaultdict
@@ -65,8 +67,15 @@ def compose_order(containers):
     return out
 
 
+COPY_LABEL = "updock.copy-file"
+COPY_MAX_FILE = 1024 * 1024        # per file
+COPY_MAX_TOTAL = 16 * 1024 * 1024  # all files of one container, held in memory
 HOOK_PREFIX = "updock.hook."
 HOOK_SKIP = 75  # EX_TEMPFAIL from a pre-update hook: skip this update, try again next run
+
+
+class CopyFileError(Exception):
+    """A updock.copy-file entry can't be carried over safely: the update is aborted."""
 
 
 class HookError(Exception):
@@ -334,7 +343,7 @@ class Updater:
             self._set(name, job="error", message=str(e))
             if notify_errors:
                 self.notifier.notify("error", name, f"{type(e).__name__}: {e}")
-            expected = isinstance(e, (DockerError, RegistryError))
+            expected = isinstance(e, (DockerError, RegistryError, CopyFileError))
             self._log(f"{type(e).__name__}: {e}", logging.ERROR, name, "error",
                       exc_info=None if expected else e)
         finally:
@@ -578,6 +587,8 @@ class Updater:
             if code not in (None, 0):
                 raise HookError(f"pre-update hook exited {code}; update aborted")
 
+        carried = self._collect_copy_files(ctr)  # before stopping: current contents
+
         deps = self.dependents(old_id, name)
         dep_running = {d["Id"]: d["State"]["Running"] for d in deps}
         for d in deps:
@@ -600,6 +611,8 @@ class Updater:
             for net, cfg in extra:
                 self.d.connect(net, new_id, cfg)
                 self._log(f"connected to network {net}", logging.DEBUG, name, "recreate")
+            if carried:
+                self._write_copy_files(new_id, name, carried)
             if was_running:
                 self.d.start(new_id)
                 self._log("started", logging.DEBUG, name, "recreate")
@@ -622,6 +635,64 @@ class Updater:
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
             self.remove_old_image(old_img, ref)
         return new_id
+
+    def _collect_copy_files(self, ctr):
+        """Read files listed in the updock.copy-file label (files that live only in the
+        container's writable layer, e.g. Compose `configs: content:`) so the replacement
+        gets them too. Returns [(path, TarInfo, bytes)]."""
+        name = ctr["Name"].lstrip("/")
+        raw = (ctr["Config"].get("Labels") or {}).get(COPY_LABEL, "")
+        paths = [p.strip() for p in raw.split(",") if p.strip()]
+        if not paths:
+            return []
+        if ctr["HostConfig"].get("ReadonlyRootfs"):
+            self._log(f"{COPY_LABEL} ignored: read-only root filesystem", logging.WARNING, name,
+                      "copy-file")
+            return []
+        mounts = [m["Destination"].rstrip("/") for m in ctr.get("Mounts") or []]
+        out, total = [], 0
+        for path in paths:
+            if not path.startswith("/") or ".." in path.split("/") or path.endswith("/"):
+                raise CopyFileError(f"{COPY_LABEL}: invalid path {path!r} (must be an "
+                                    "absolute file path without '..')")
+            if any(path == m or path.startswith(m + "/") for m in mounts):
+                self._log(f"{path} is on a volume/bind mount and survives anyway; not copied",
+                          logging.INFO, name, "copy-file")
+                continue
+            try:
+                data = self.d.get_archive(ctr["Id"], path, COPY_MAX_FILE + 64 * 1024)
+            except DockerError as e:
+                if e.status == 404:
+                    self._log(f"{path} doesn't exist; not copied", logging.WARNING, name,
+                              "copy-file")
+                    continue
+                if e.status == 413:
+                    raise CopyFileError(f"{COPY_LABEL}: {path} is over 1 MiB") from None
+                raise
+            with tarfile.open(fileobj=io.BytesIO(data)) as tf:
+                members = tf.getmembers()
+                if len(members) != 1 or not members[0].isreg():
+                    raise CopyFileError(f"{COPY_LABEL}: {path} is not a regular file")
+                info = members[0]
+                if info.size > COPY_MAX_FILE:
+                    raise CopyFileError(f"{COPY_LABEL}: {path} is over 1 MiB")
+                total += info.size
+                if total > COPY_MAX_TOTAL:
+                    raise CopyFileError(f"{COPY_LABEL}: files total over 16 MiB")
+                out.append((path, info, tf.extractfile(info).read()))
+        return out
+
+    def _write_copy_files(self, cid, name, files):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for path, info, data in files:
+                ti = tarfile.TarInfo(path.lstrip("/"))
+                ti.size, ti.mode, ti.uid, ti.gid, ti.mtime = (len(data), info.mode, info.uid,
+                                                              info.gid, info.mtime)
+                tf.addfile(ti, io.BytesIO(data))
+        self.d.put_archive(cid, "/", buf.getvalue())
+        self._log(f"copied {', '.join(p for p, _, _ in files)} into the new container",
+                  container=name, event="copy-file")
 
     def _verify(self, cid, name):
         """Wait for the new container to prove itself; raise UnhealthyError to roll back.

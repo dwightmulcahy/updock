@@ -370,3 +370,31 @@ def test_ping(mock_docker):
     assert d.ping() is True and s["requests"][-1].url.path == "/_ping"
     s["handler"] = lambda r: httpx.Response(500)
     assert d.ping() is False
+
+
+# ---------- archives ----------
+
+def test_get_archive(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(200, content=iter([b"ab", b"cd"]))
+    assert d.get_archive("c1", "/etc/x", 10) == b"abcd"
+    assert s["requests"][-1].url.params["path"] == "/etc/x"
+    with pytest.raises(DockerError) as e:
+        d.get_archive("c1", "/etc/x", 3)
+    assert e.value.status == 413
+    s["handler"] = lambda r: httpx.Response(404, text="no such file")
+    with pytest.raises(DockerError) as e:
+        d.get_archive("c1", "/nope", 10)
+    assert e.value.status == 404
+
+
+def test_put_archive(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(200)
+    d.put_archive("c1", "/", b"TAR")
+    req = s["requests"][-1]
+    assert req.method == "PUT" and req.content == b"TAR"
+    assert req.headers["content-type"] == "application/x-tar"
+    s["handler"] = lambda r: httpx.Response(500, text="read-only file system")
+    with pytest.raises(DockerError, match="read-only"):
+        d.put_archive("c1", "/", b"TAR")

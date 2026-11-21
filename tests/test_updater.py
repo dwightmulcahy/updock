@@ -1488,3 +1488,137 @@ def test_on_change_callback_and_errors(up, fake):
     up.on_change = lambda n, st: 1 / 0
     up.check("web")  # a broken listener doesn't break the job
     assert up.state["web"]["job"] == "up-to-date"
+
+
+# ---------- copy-file ----------
+
+import io as _io  # noqa: E402
+import tarfile as _tarfile  # noqa: E402
+
+from app.docker_api import DockerError as _DockerError  # noqa: E402
+
+
+def tar_of(name, data=b"x", kind=_tarfile.REGTYPE, size=None, extra=0, mode=0o640, uid=7, gid=8):
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w") as tf:
+        for i in range(1 + extra):
+            ti = _tarfile.TarInfo(name if i == 0 else f"{name}{i}")
+            ti.type, ti.mode, ti.uid, ti.gid = kind, mode, uid, gid
+            if kind == _tarfile.REGTYPE:
+                ti.size = len(data) if size is None else size
+                tf.addfile(ti, _io.BytesIO(data.ljust(ti.size, b"\0")))
+            else:
+                tf.addfile(ti)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def fup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.archives, fake.written = {}, []
+
+    def get_archive(cid, path, max_bytes):
+        res = fake.archives.get(path, _DockerError(404, "not found"))
+        if isinstance(res, Exception):
+            raise res
+        return res
+
+    def put_archive(cid, path, data):
+        if getattr(fake, "put_fails", None):
+            raise fake.put_fails
+        with _tarfile.open(fileobj=_io.BytesIO(data)) as tf:
+            fake.written.append((cid, path, [(m.name, m.mode, m.uid, m.gid,
+                                              tf.extractfile(m).read()) for m in tf]))
+    fake.get_archive, fake.put_archive = get_archive, put_archive
+    return Updater(fake)
+
+
+def copy_ctr(fake, label, **hc):
+    c = make_ctr()
+    c["Config"]["Labels"]["updock.copy-file"] = label
+    c["HostConfig"].update(hc)
+    return fake.add(c)
+
+
+def test_copy_files_carried_into_new_container(fup, fake):
+    copy_ctr(fake, " /etc/app/config.yml , /data/db.sqlite,/opt/a.conf, /gone ")
+    fake.archives["/etc/app/config.yml"] = tar_of("config.yml", b"key: v\n")
+    fake.archives["/opt/a.conf"] = tar_of("a.conf", b"A", mode=0o600, uid=0, gid=0)
+    fup.update("web", force=True)
+    assert fup.state["web"]["job"] == "updated"
+    (cid, path, files), = fake.written
+    assert cid.startswith("new") and path == "/"
+    assert files == [("etc/app/config.yml", 0o640, 7, 8, b"key: v\n"), ("opt/a.conf", 0o600, 0, 0, b"A")]
+    msgs = [e["msg"] for e in fup.logs if e["event"] == "copy-file"]
+    assert "/data/db.sqlite is on a volume/bind mount and survives anyway; not copied" in msgs
+    assert "/gone doesn't exist; not copied" in msgs
+    assert "copied /etc/app/config.yml, /opt/a.conf into the new container" in msgs
+    assert fake.calls.index("create") < fake.calls.index("start")
+
+
+def test_no_label_no_archive_calls(fup, fake):
+    fake.add(make_ctr())
+    fake.get_archive = lambda *a: pytest.fail("archive read without label")
+    fup.update("web", force=True)
+    assert fake.written == []
+
+
+def test_only_missing_or_mounted_files_writes_nothing(fup, fake):
+    copy_ctr(fake, "/data/x,/gone")
+    fup.update("web", force=True)
+    assert fake.written == [] and fup.state["web"]["job"] == "updated"
+
+
+def test_read_only_rootfs_skipped(fup, fake):
+    copy_ctr(fake, "/etc/app/config.yml", ReadonlyRootfs=True)
+    fake.archives["/etc/app/config.yml"] = tar_of("config.yml")
+    fup.update("web", force=True)
+    assert fake.written == [] and any("read-only root filesystem" in e["msg"] for e in fup.logs)
+
+
+@pytest.mark.parametrize("label,setup,reason", [
+    ("etc/relative", None, "invalid path"),
+    ("/etc/../shadow", None, "invalid path"),
+    ("/etc/app/", None, "invalid path"),
+    ("/etc/dir", tar_of("dir", kind=_tarfile.DIRTYPE), "not a regular file"),
+    ("/etc/link", tar_of("link", kind=_tarfile.SYMTYPE), "not a regular file"),
+    ("/etc/many", tar_of("many", extra=1), "not a regular file"),
+    ("/etc/big", tar_of("big", size=1024 * 1024 + 1), "over 1 MiB"),
+    ("/etc/huge", _DockerError(413, "too big"), "over 1 MiB"),
+])
+def test_unsafe_entries_abort_before_stopping(fup, fake, label, setup, reason):
+    copy_ctr(fake, label)
+    if setup is not None:
+        fake.archives[label] = setup
+    fup.update("web", force=True)
+    st = fup.state["web"]
+    assert st["job"] == "error" and reason in st["message"]
+    assert "stop" not in fake.calls and fake.ctrs["web"]["Id"] == CID
+    assert "exc" not in fup.logs[-1]  # expected error: no traceback
+
+
+def test_total_size_limit(fup, fake, monkeypatch):
+    import app.updater as upd
+    monkeypatch.setattr(upd, "COPY_MAX_TOTAL", 3)
+    copy_ctr(fake, "/a,/b")
+    fake.archives["/a"] = tar_of("a", b"12")
+    fake.archives["/b"] = tar_of("b", b"34")
+    fup.update("web", force=True)
+    assert "files total over 16 MiB" in fup.state["web"]["message"]
+
+
+def test_other_archive_errors_propagate(fup, fake):
+    copy_ctr(fake, "/etc/x")
+    fake.archives["/etc/x"] = _DockerError(500, "daemon broke")
+    fup.update("web", force=True)
+    assert "daemon broke" in fup.state["web"]["message"] and "stop" not in fake.calls
+
+
+def test_write_failure_after_stop_rolls_back(fup, fake):
+    copy_ctr(fake, "/etc/x")
+    fake.archives["/etc/x"] = tar_of("x")
+    fake.put_fails = _DockerError(500, "no space")
+    fup.update("web", force=True)
+    assert fup.state["web"]["job"] == "error" and fake.ctrs["web"]["Id"] == CID
+    assert set(fake.ctrs) == {"web"}
+    assert any("no space; rolling back" in e["msg"] for e in fup.logs)

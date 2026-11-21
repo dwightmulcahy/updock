@@ -60,6 +60,15 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 
 Containers that share the updated container's network (`network_mode: container:<name>`, or Compose `network_mode: service:<name>`, e.g. apps behind a VPN container) are stopped first and recreated afterwards to join the new container's network. If the update rolls back, they are simply restarted.
 
+Files that exist only in the container's writable layer are lost on any recreate — notably Compose `configs:` with `content:` or `environment:` (and anything an app wrote outside a volume). List them in the label `updock.copy-file` (comma-separated absolute paths) and Updock copies each one into the replacement before it starts, keeping owner and permissions:
+
+```yaml
+labels:
+  updock.copy-file: "/etc/app/config.yml,/etc/app/extra.conf"
+```
+
+Paths on volumes or bind mounts are skipped (they survive anyway), as are missing files and containers with a read-only root filesystem (logged). Directories, symlinks, files over 1 MiB (16 MiB total) or paths with `..` abort that container's update before it's stopped; a failed copy after stopping rolls back to the old container.
+
 Docker Compose projects are handled as a unit: within a project, services are updated after the services they `depends_on`; services with `depends_on: {<svc>: {restart: true}}` are restarted when that service is recreated (as `docker compose` would); and the `com.docker.compose.image` label is updated so a later `docker compose up -d` leaves Updock's containers alone instead of recreating them.
 
 Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the new image's defaults apply; values you set yourself are kept.
