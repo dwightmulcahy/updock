@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
+from . import metrics as metricsmod
 from .docker_api import Docker
 from .notify import EmailNotifier
 from .registry import Registry
@@ -58,6 +59,11 @@ def init_store(directory, buf):
 
 
 STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
+LOG_COUNTS = {}
+LOGBUF.listeners.append(lambda e: LOG_COUNTS.__setitem__(e["level"], LOG_COUNTS.get(e["level"], 0) + 1))
+METRICS_PUBLIC = env_bool("UPDOCK_METRICS_PUBLIC", False)
+PROBES = {"/health", "/livez", "/readyz", "/startupz"}
+STARTED = {"done": False}
 DISK_MAX = parse_size(os.environ["UPDOCK_DISK_MAX"]) if os.getenv("UPDOCK_DISK_MAX") else 0
 DISK_WARN = parse_threshold(os.environ["UPDOCK_DISK_WARN"], DISK_MAX) \
     if os.getenv("UPDOCK_DISK_WARN") else 0
@@ -134,6 +140,7 @@ async def lifespan(_):
             "auto-update" if AUTO_UPDATE else "check only",
             f", maintenance window {WINDOW}" if WINDOW else "", extra={"event": "run"})
         threading.Thread(target=scheduler, daemon=True).start()
+    STARTED["done"] = True
     yield
 
 
@@ -165,7 +172,8 @@ def csrf_violation(request):
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
-    if UI_PASS and request.url.path != "/health":
+    public = request.url.path in PROBES or (METRICS_PUBLIC and request.url.path == "/metrics")
+    if UI_PASS and not public:
         ok = False
         h = request.headers.get("authorization", "")
         if h.startswith("Basic "):
@@ -204,6 +212,35 @@ def bg(fn, *a):
 @app.get("/health")
 def health():
     return {"status": "ok", "version": VERSION, "commit": COMMIT}
+
+
+@app.get("/livez")
+def livez():
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        ok = up.d.ping()
+    except Exception:
+        ok = False
+    if not ok:
+        return JSONResponse({"status": "unavailable", "docker": False}, status_code=503)
+    return {"status": "ok", "docker": True}
+
+
+@app.get("/startupz")
+def startupz():
+    if not STARTED["done"]:
+        return JSONResponse({"status": "starting"}, status_code=503)
+    return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics():
+    return PlainTextResponse(metricsmod.render(up, up.list(), VERSION, COMMIT, LOG_COUNTS),
+                             media_type="text/plain; version=0.0.4")
 
 
 @app.get("/")

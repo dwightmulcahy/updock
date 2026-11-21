@@ -362,3 +362,11 @@ def test_disk_usage(mock_docker):
     assert s["requests"][-1].url.params["type"] == "image"
     s["handler"] = lambda r: httpx.Response(200, json={"Images": [{"Size": 5}]})
     assert d.disk_usage()["used"] == 5
+
+
+def test_ping(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(200, text="OK")
+    assert d.ping() is True and s["requests"][-1].url.path == "/_ping"
+    s["handler"] = lambda r: httpx.Response(500)
+    assert d.ping() is False
