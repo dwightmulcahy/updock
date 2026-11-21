@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  PYTHON_VERSION: "3.13"
+  PYTHON_VERSION: "3.15"  # keep in step with the Dockerfile base image
   IMAGE: updock:ci
   PORT: "8080"
 

@@ -7,10 +7,14 @@ updates:
       actions: { patterns: ["*"] }
     commit-message: { prefix: "ci" }
 
-
-  - package-ecosystem: pip
+  - package-ecosystem: pip  # updates requirements*.in and the hashed pip-compile locks
     directory: /
     schedule: { interval: weekly, day: monday }
+    groups:
+      runtime:
+        dependency-type: production
+      dev:
+        dependency-type: development
     commit-message: { prefix: "chore(deps)" }
 
   - package-ecosystem: docker

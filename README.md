@@ -135,10 +135,17 @@ Private registries: mount `~/.docker/config.json` to `/config/config.json` (plai
 ## Development
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-dev.txt   # hashed lock: exact versions only
 ruff check . --select F && pyflakes app scripts tests
 pytest                     # fails if coverage < 90%
 ```
+
+Dependencies are declared in `requirements.in` / `requirements-dev.in` and locked
+with hashes in `requirements.txt` / `requirements-dev.txt`. After editing a `.in`
+file, run `pip-compile --generate-hashes --strip-extras --allow-unsafe <file>.in`.
+The image installs with `--require-hashes`, so builds are reproducible and a
+tampered package fails the build. Dependabot updates both files, grouped into one
+runtime PR and one dev PR per week.
 
 CI pins every external GitHub Action to an immutable commit SHA, pins the
 Docker base image by version and multi-architecture digest, smoke-tests the

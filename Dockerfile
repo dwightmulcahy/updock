@@ -9,7 +9,8 @@ WORKDIR /app
 # Pick up Debian security fixes released after the pinned base image
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Exact versions with hashes: reproducible builds, tampered packages are rejected
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.txt
 # Runtime needs no package manager (and its bundled CVEs)
 RUN python -m pip uninstall -y pip setuptools wheel
 # Files owned by root and the root filesystem is read-only at runtime (see compose.yaml).
