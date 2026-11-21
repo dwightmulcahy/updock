@@ -70,6 +70,10 @@ labels:
   updock.hook.pre-update-timeout: "10m"
 ```
 
+### Disk space guard
+
+Set `UPDOCK_DISK_MAX` (e.g. `40GB`) and/or `UPDOCK_DISK_WARN` (a size, or a percentage of the max such as `80%`). At the start of each scheduled run (and **Update all**), Updock reads Docker's image storage (`docker system df`). At or over the max, the run only checks — nothing new is downloaded — and you get a `disk` email; over the warning level it logs a warning and emails once. If the usage can't be read, updates are skipped (fails closed). The header shows current image storage. This only covers Docker images, not volumes, logs or free space on the host; pair it with `UPDOCK_CLEANUP=true`.
+
 ### Image cooldown
 
 Set `UPDOCK_COOLDOWN` (e.g. `24h`, `3d12h`) to make scheduled runs wait until a new image is at least that old before applying it. A compromised or broken release then has time to be noticed and pulled before it reaches you. The age comes from the image's build date, read from the registry without downloading the image; images with no (or a future) build date are not applied automatically. The row shows **cooldown** and when the update will be applied. Override per container with the label `updock.cooldown=12h` (`0` disables it for that container). **Update now** and version deploys ignore the cooldown.
@@ -98,7 +102,7 @@ Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks
 | `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
 | `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
 | `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
-| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available` | Also: `deploy` |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,disk` | Also: `deploy` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
@@ -128,6 +132,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
+| Image storage vs. limits | `GET /api/disk` |
 | Email settings / send test email | `GET /api/notify`, `POST /api/notify/test` |
 
 Webhook example (e.g. from CI after pushing an image):
@@ -149,6 +154,8 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_DISK_MAX` | empty | Image storage limit (`40GB`, `20GiB`); at/over it scheduled runs only check |
+| `UPDOCK_DISK_WARN` | empty | Warning level: a size or a percentage of the max (`80%`) |
 | `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
 | `UPDOCK_DIGEST_CHECK` | `true` | Check the registry digest before pulling; `false` = always pull to check |
