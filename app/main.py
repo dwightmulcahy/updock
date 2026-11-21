@@ -11,10 +11,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
+                               StreamingResponse)
 
 from . import metrics as metricsmod
 from .docker_api import Docker
+from .events import EventHub
+from . import events as eventsmod
 from .notify import EmailNotifier
 from .registry import Registry
 from .schedule import Cron, Window, parse_duration
@@ -62,6 +65,9 @@ STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
 LOG_COUNTS = {}
 LOGBUF.listeners.append(lambda e: LOG_COUNTS.__setitem__(e["level"], LOG_COUNTS.get(e["level"], 0) + 1))
 METRICS_PUBLIC = env_bool("UPDOCK_METRICS_PUBLIC", False)
+API_TOKEN = os.getenv("UPDOCK_API_TOKEN", "").strip()
+HUB = EventHub()
+LOGBUF.listeners.append(lambda e: HUB.publish("log", e))
 PROBES = {"/health", "/livez", "/readyz", "/startupz"}
 STARTED = {"done": False}
 DISK_MAX = parse_size(os.environ["UPDOCK_DISK_MAX"]) if os.getenv("UPDOCK_DISK_MAX") else 0
@@ -89,6 +95,7 @@ SECURITY_HEADERS = {
         "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
         "form-action 'self'"),
 }
+up.on_change = lambda name, st: HUB.publish("state", {"name": name, **st})
 TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
@@ -172,10 +179,16 @@ def csrf_violation(request):
 
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
-    public = request.url.path in PROBES or (METRICS_PUBLIC and request.url.path == "/metrics")
+    path = request.url.path
+    public = path in PROBES or (METRICS_PUBLIC and path == "/metrics")
+    h = request.headers.get("authorization", "")
+    if h.startswith("Bearer ") and (path.startswith("/api/") or path == "/metrics"):
+        # API token for scripts, CI webhooks and Prometheus: never falls back to Basic
+        if not (API_TOKEN and secrets.compare_digest(h[7:].strip(), API_TOKEN)):
+            return JSONResponse({"detail": "invalid API token"}, status_code=401)
+        return await call_next(request)
     if UI_PASS and not public:
         ok = False
-        h = request.headers.get("authorization", "")
         if h.startswith("Basic "):
             try:
                 u, _, p = base64.b64decode(h[6:]).decode(errors="ignore").partition(":")
@@ -330,6 +343,14 @@ def disk():
         return up.disk_status(max_age=60)
     except Exception as e:
         raise HTTPException(502, f"could not read disk usage: {e}")
+
+
+@app.get("/api/events")
+async def events(request: Request):
+    q = HUB.subscribe()
+    return StreamingResponse(eventsmod.stream(HUB, q, request.is_disconnected),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/notify")

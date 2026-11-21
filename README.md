@@ -147,12 +147,17 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 | Image storage vs. limits | `GET /api/disk` |
+| Live events (SSE: `state`, `log`) | `GET /api/events` |
 | Email settings / send test email | `GET /api/notify`, `POST /api/notify/test` |
 
-Webhook example (e.g. from CI after pushing an image):
+Webhook example (e.g. from CI after pushing an image), with an API token so scripts don't need the UI password:
 ```sh
-curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
+curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/containers/myapp/update
 ```
+
+`UPDOCK_API_TOKEN` is accepted as `Authorization: Bearer …` on `/api/*` and `/metrics` only (never for the UI page); a wrong token is rejected rather than falling back to the password. It's an alternative to the password, so set `UPDOCK_PASSWORD` too.
+
+`GET /api/events` is a Server-Sent Events stream of `state` (container status/progress changes) and `log` (new log entries) events. The UI uses it for live updates and only falls back to polling when it can't connect.
 
 ## Config
 
@@ -175,6 +180,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_DIGEST_CHECK` | `true` | Check the registry digest before pulling; `false` = always pull to check |
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
 | `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
+| `UPDOCK_API_TOKEN` | empty | Bearer token for `/api/*` and `/metrics` (scripts, webhooks, Prometheus) |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
 | `UPDOCK_METRICS_PUBLIC` | `false` | Serve `/metrics` without login |
