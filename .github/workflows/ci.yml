@@ -102,16 +102,18 @@ jobs:
         run: |
           set -euo pipefail
           base="http://localhost:${PORT}"
-          curl -fsS -u admin:ci-secret -X POST "$base/api/containers/smoke-target/check"
+          job() {
+            curl -fsS -u admin:ci-secret "$base/api/containers" | python3 -c \
+              "import json,sys; c=[x for x in json.load(sys.stdin)['containers'] if x['name']=='smoke-target'][0]; print(c.get('job') or '')"
+          }
           ok=0
-          for i in $(seq 1 30); do
-            curl -fsS -u admin:ci-secret "$base/api/containers" > c.json
-            python3 - <<'PY' && { ok=1; break; }
-          import json, sys
-          c = next(x for x in json.load(open("c.json"))["containers"] if x["name"] == "smoke-target")
-          print(c.get("job"), c.get("latest"))
-          sys.exit(0 if c.get("job") == "up-to-date" and (c.get("latest") or {}).get("digest") else 1)
-          PY
+          for i in $(seq 1 60); do
+            j="$(job)"; echo "job=$j"
+            if [ "$j" = up-to-date ]; then ok=1; break; fi
+            # (re)queue a check once the previous job (recreate + health grace) has finished
+            case "$j" in checking|pulling|updating) ;; *)
+              curl -fsS -u admin:ci-secret -X POST "$base/api/containers/smoke-target/check" >/dev/null ;;
+            esac
             sleep 1
           done
           [ "$ok" = 1 ] || { echo "::error::digest check did not report up-to-date"; exit 1; }
