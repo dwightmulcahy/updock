@@ -15,7 +15,50 @@ IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
                       "Healthcheck", "StopSignal", "OnBuild", "Shell")
 EP_KEEP = ("IPAMConfig", "Links", "Aliases", "DriverOpts")
 
+COMPOSE_PROJECT = "com.docker.compose.project"
+COMPOSE_SERVICE = "com.docker.compose.service"
+COMPOSE_DEPENDS = "com.docker.compose.depends_on"
+COMPOSE_IMAGE = "com.docker.compose.image"
+
 log = logging.getLogger("updock")
+
+
+def compose_depends(labels):
+    """Parse 'db:service_healthy:true,cache:service_started' -> {service: restart?}."""
+    out = {}
+    for item in (labels or {}).get(COMPOSE_DEPENDS, "").split(","):
+        parts = item.strip().split(":")
+        if parts[0]:
+            out[parts[0]] = len(parts) > 2 and parts[2].lower() == "true"
+    return out
+
+
+def compose_order(containers):
+    """Order container list entries so Compose dependencies come before dependents
+    (stable otherwise; cycles and unknown services keep their original order)."""
+    by_key = {}
+    for c in containers:
+        labels = c.get("Labels") or {}
+        if labels.get(COMPOSE_PROJECT) and labels.get(COMPOSE_SERVICE):
+            by_key.setdefault((labels[COMPOSE_PROJECT], labels[COMPOSE_SERVICE]), []).append(c)
+    out, done, visiting = [], set(), set()
+
+    def visit(c):
+        cid = c["Id"]
+        if cid in done or cid in visiting:
+            return
+        visiting.add(cid)
+        labels = c.get("Labels") or {}
+        for svc in compose_depends(labels):
+            for dep in by_key.get((labels.get(COMPOSE_PROJECT), svc), []):
+                visit(dep)
+        visiting.discard(cid)
+        done.add(cid)
+        out.append(c)
+
+    for c in containers:
+        visit(c)
+    return out
 
 
 class UnhealthyError(Exception):
@@ -272,6 +315,7 @@ class Updater:
             change = self._describe_change(ctr)  # before cleanup removes the old image
             try:
                 self._recreate(ctr, cleanup=True)
+                self._restart_compose_dependents(ctr)
             except UnhealthyError:
                 if avail:
                     self._set(name, failed_image=target)
@@ -321,6 +365,7 @@ class Updater:
             self._set(name, job="updating", message=f"Deploying {new_ref}")
             # Keep the previous image so switching back is instant.
             self._recreate(ctr, image_ref=new_ref, cleanup=False)
+            self._restart_compose_dependents(ctr)
             self._set(name, job="deployed", ref=new_ref, update_available=False,
                       latest=None, last_update=time.time(), message="")
             self._log(f"deployed {new_ref}", container=name, event="deploy")
@@ -346,6 +391,13 @@ class Updater:
         except Exception:
             img_cfg = None
         body, extra = build_create_body(ctr, img_cfg, image_ref)
+        if (body.get("Labels") or {}).get(COMPOSE_IMAGE) and not network_parent:
+            # Compose compares this with the image to decide whether to recreate on `up`
+            try:
+                body["Labels"][COMPOSE_IMAGE] = self.d.image(body["Image"])["Id"]
+            except Exception as e:
+                self._log(f"could not refresh {COMPOSE_IMAGE} label: {e}", logging.DEBUG, name,
+                          "compose")
         if network_parent:
             body["HostConfig"]["NetworkMode"] = f"container:{network_parent}"
         was_running = ctr["State"]["Running"] if start is None else start
@@ -428,6 +480,26 @@ class Updater:
             self.sleep(min(2, max(0.1, deadline - self.clock())))
             info = self.d.inspect(cid)
 
+    def _restart_compose_dependents(self, ctr):
+        """Mimic Compose `depends_on: {restart: true}`: restart services that asked to be
+        restarted when this one is recreated."""
+        labels = ctr["Config"].get("Labels") or {}
+        project, service = labels.get(COMPOSE_PROJECT), labels.get(COMPOSE_SERVICE)
+        if not (project and service):
+            return
+        for c in self.d.containers():
+            cl = c.get("Labels") or {}
+            if cl.get(COMPOSE_PROJECT) == project and compose_depends(cl).get(service):
+                cname = c["Names"][0].lstrip("/")
+                try:
+                    timeout = self.d.inspect(c["Id"])["Config"].get("StopTimeout") or 10
+                    self.d.restart(c["Id"], timeout)
+                    self._log(f"restarted because {service} was recreated (depends_on restart)",
+                              container=cname, event="compose")
+                except Exception as e:
+                    self._log(f"restart after {service} was recreated failed: {e}",
+                              logging.ERROR, cname, "compose")
+
     def _restart_dependents(self, deps, dep_running):
         for d in deps:
             if dep_running[d["Id"]]:
@@ -484,7 +556,7 @@ class Updater:
         t0 = time.monotonic()
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
         with self.notifier.batch():
-            for c in self.d.containers():
+            for c in compose_order(self.d.containers()):
                 if self.eligible(c):
                     name = c["Names"][0].lstrip("/")
                     if update:

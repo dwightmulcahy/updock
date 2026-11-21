@@ -191,3 +191,14 @@ def test_pull_stream_error(mock_docker):
     s["handler"] = lambda r: httpx.Response(200, content=b'{"status":"x"}\n{"error":"denied"}\n')
     with pytest.raises(DockerError, match="denied"):
         d.pull("nginx")
+
+
+def test_restart(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(204)
+    d.restart("id", 5)
+    assert s["requests"][-1].url.path == "/containers/id/restart"
+    assert s["requests"][-1].url.params["t"] == "5"
+    s["handler"] = lambda r: httpx.Response(404, text="gone")
+    with pytest.raises(DockerError):
+        d.restart("id")

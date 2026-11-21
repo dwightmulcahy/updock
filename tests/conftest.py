@@ -129,6 +129,10 @@ class FakeDocker:
         self.ctrs[name]["Config"]["Healthcheck"] = body.get("Healthcheck")
         return cid
 
+    def restart(self, cid, t=10):
+        self._maybe_fail("restart")
+        self.restarted = getattr(self, "restarted", []) + [cid]
+
     def connect(self, net, cid, cfg):
         self._maybe_fail("connect")
         self.connected = getattr(self, "connected", []) + [(net, cfg)]
