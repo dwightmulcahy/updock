@@ -133,7 +133,11 @@ async function deployTag() {
   await post(`/api/containers/${encodeURIComponent(vname)}/deploy?tag=${encodeURIComponent(tag)}`);
 }
 
-async function post(url) { await fetch(url, {method:"POST"}); setTimeout(refresh, 300); }
+async function post(url) {
+  const r = await fetch(url, { method: "POST", headers: { "X-Updock-Request": "1" } });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.detail || `Request failed (${r.status})`); }
+  setTimeout(refresh, 300);
+}
 
 async function refresh() {
   try {

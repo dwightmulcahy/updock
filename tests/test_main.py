@@ -185,3 +185,73 @@ def test_deploy_endpoint(client, up):
     for bad in ("-x", "a/b", "a:b", "x" * 129):
         assert client.post("/api/containers/web/deploy", params={"tag": bad}).status_code == 400
     assert client.post("/api/containers/web/deploy").status_code == 422
+
+
+# ---------- CSRF / security headers ----------
+
+SAME = {"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin", "X-Updock-Request": "1"}
+
+
+def test_post_from_ui_allowed(client, up):
+    assert client.post("/api/check-all", headers=SAME).status_code == 202
+
+
+def test_post_without_browser_headers_allowed(client, up):
+    # curl / CI webhooks: no Origin, no Sec-Fetch-Site
+    assert client.post("/api/check-all").status_code == 202
+
+
+@pytest.mark.parametrize("headers,reason", [
+    ({"Origin": "https://evil.example"}, "origin https://evil.example not allowed"),
+    ({"Origin": "null"}, "origin null not allowed"),
+    ({"Sec-Fetch-Site": "cross-site"}, "Sec-Fetch-Site: cross-site"),
+    ({"Sec-Fetch-Site": "same-site", "Origin": "http://testserver"}, "same-site"),
+    ({"Origin": "http://testserver"}, "missing X-Updock-Request"),
+    ({"Sec-Fetch-Site": "same-origin", "X-Updock-Request": "0"}, "missing X-Updock-Request"),
+])
+def test_cross_site_posts_blocked(client, up, buf, headers, reason):
+    r = client.post("/api/update-all", headers=headers)
+    assert r.status_code == 403 and reason in r.json()["detail"]
+    up.run_all.assert_not_called()
+    assert r.headers["x-frame-options"] == "DENY"
+
+
+def test_blocked_request_is_logged(client, up, monkeypatch):
+    from app.logs import LogBuffer
+    b = LogBuffer()
+    logging.getLogger("updock").addHandler(b)
+    try:
+        client.post("/api/update-all", headers={"Origin": "https://evil.example"})
+    finally:
+        logging.getLogger("updock").removeHandler(b)
+    e = b.entries[-1]
+    assert e["level"] == "WARNING" and e["event"] == "security"
+    assert "blocked POST /api/update-all" in e["msg"]
+
+
+def test_allowed_origins_for_reverse_proxy(client, up, monkeypatch):
+    monkeypatch.setattr(main, "ALLOWED_ORIGINS", {"https://updock.example.com"})
+    h = {"Origin": "https://updock.example.com/", "X-Updock-Request": "1"}
+    assert client.post("/api/check-all", headers=h).status_code == 202
+
+
+def test_sec_fetch_site_none_allowed(client, up):
+    h = {"Sec-Fetch-Site": "none", "X-Updock-Request": "1"}
+    assert client.post("/api/check-all", headers=h).status_code == 202
+
+
+def test_get_never_csrf_checked(client, up):
+    r = client.get("/api/containers", headers={"Origin": "https://evil.example",
+                                               "Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 200
+
+
+def test_security_headers(client, up, monkeypatch):
+    r = client.get("/")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert "cache-control" not in r.headers
+    assert client.get("/api/containers").headers["cache-control"] == "no-store"
+    monkeypatch.setattr(main, "UI_PASS", "secret")
+    r401 = client.get("/api/containers")
+    assert r401.status_code == 401 and r401.headers["x-frame-options"] == "DENY"

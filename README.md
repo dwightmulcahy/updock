@@ -30,6 +30,13 @@ container only so it can reach the mounted Docker socket.
 > Access to the Docker socket is equivalent to root on the host. Always set
 > `UPDOCK_PASSWORD` and don't expose port 8080 publicly.
 
+State-changing requests from browsers must come from the Updock page itself
+(same origin, `Sec-Fetch-Site`, and an `X-Updock-Request` header), so another
+website can't use your saved login to trigger updates. Scripts and webhooks
+(curl, CI) are unaffected. Behind a reverse proxy that rewrites `Host`, list
+the public URL in `UPDOCK_ALLOWED_ORIGINS`. Responses also send a strict
+Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`.
+
 ## How it works
 
 1. Pulls each container's image tag (`nginx:latest`, etc.).
@@ -84,6 +91,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
 | `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |

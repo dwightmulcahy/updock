@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -31,6 +32,19 @@ COMMIT = os.getenv("GIT_SHA", "")[:7]
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF)
+ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
+                   if o.strip()}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+CSRF_HEADER = "x-updock-request"
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'self'"),
+}
 TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
@@ -58,6 +72,29 @@ async def lifespan(_):
 app = FastAPI(lifespan=lifespan)
 
 
+def csrf_violation(request):
+    """Why a state-changing request looks cross-site, or None if it is acceptable.
+
+    Browsers attach saved Basic-auth credentials to any request, including forms posted
+    from other sites, so browser requests must prove they come from the Updock page.
+    Non-browser clients (curl, CI webhooks) send neither Origin nor Sec-Fetch-Site and
+    carry no ambient credentials, so they are not subject to CSRF."""
+    if request.method not in UNSAFE_METHODS:
+        return None
+    h = request.headers
+    origin, site = h.get("origin"), h.get("sec-fetch-site")
+    if origin is None and site is None:
+        return None
+    if site is not None and site not in ("same-origin", "none"):
+        return f"cross-site request (Sec-Fetch-Site: {site})"
+    if origin is not None and origin.rstrip("/") not in ALLOWED_ORIGINS \
+            and urlsplit(origin).netloc != h.get("host"):
+        return f"origin {origin} not allowed"
+    if h.get(CSRF_HEADER) != "1":
+        return "missing X-Updock-Request header"
+    return None
+
+
 @app.middleware("http")
 async def basic_auth(request: Request, call_next):
     if UI_PASS and request.url.path != "/health":
@@ -72,6 +109,23 @@ async def basic_auth(request: Request, call_next):
         if not ok:
             return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="updock"'})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security(request: Request, call_next):
+    reason = csrf_violation(request)
+    if reason:
+        logging.getLogger("updock").warning(
+            "blocked %s %s: %s", request.method, request.url.path, reason,
+            extra={"event": "security"})
+        resp = JSONResponse({"detail": f"Forbidden: {reason}"}, status_code=403)
+    else:
+        resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    if request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
 
 
 def bg(fn, *a):
