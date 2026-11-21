@@ -11,11 +11,14 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - updock-data:/data
+    secrets: [updock_password, updock_api_token, updock_smtp_password]
     init: true
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     cap_drop: [ALL]
+    # Lets root in the container read ./secrets files that stay chmod 600 for your user
+    cap_add: [DAC_READ_SEARCH]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 200
     mem_limit: 256m
@@ -29,3 +32,12 @@ services:
 
 volumes:
   updock-data:
+
+# Files in ./secrets (create with scripts/init-secrets.sh); mounted at /run/secrets/<name>
+secrets:
+  updock_password:
+    file: ./secrets/updock_password
+  updock_api_token:
+    file: ./secrets/updock_api_token
+  updock_smtp_password:
+    file: ./secrets/updock_smtp_password

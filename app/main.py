@@ -15,6 +15,7 @@ from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Re
                                StreamingResponse)
 
 from . import metrics as metricsmod
+from .config import load_env
 from .docker_api import Docker
 from .events import EventHub
 from . import events as eventsmod
@@ -48,7 +49,8 @@ TZ = _tz(os.getenv("TZ", "").strip())
 CRON = Cron(os.environ["UPDOCK_SCHEDULE"]) if os.getenv("UPDOCK_SCHEDULE", "").strip() else None
 WINDOW = Window(os.environ["UPDOCK_WINDOW"]) if os.getenv("UPDOCK_WINDOW", "").strip() else None
 UI_USER = os.getenv("UPDOCK_USER", "admin")
-UI_PASS = os.getenv("UPDOCK_PASSWORD", "")
+ENV = load_env()  # UPDOCK_*_FILE -> value (Compose secrets in ./secrets)
+UI_PASS = ENV["UPDOCK_PASSWORD"]
 VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
 
@@ -65,7 +67,7 @@ STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
 LOG_COUNTS = {}
 LOGBUF.listeners.append(lambda e: LOG_COUNTS.__setitem__(e["level"], LOG_COUNTS.get(e["level"], 0) + 1))
 METRICS_PUBLIC = env_bool("UPDOCK_METRICS_PUBLIC", False)
-API_TOKEN = os.getenv("UPDOCK_API_TOKEN", "").strip()
+API_TOKEN = ENV["UPDOCK_API_TOKEN"].strip()
 HUB = EventHub()
 LOGBUF.listeners.append(lambda e: HUB.publish("log", e))
 PROBES = {"/health", "/livez", "/readyz", "/startupz"}
@@ -73,7 +75,7 @@ STARTED = {"done": False}
 DISK_MAX = parse_size(os.environ["UPDOCK_DISK_MAX"]) if os.getenv("UPDOCK_DISK_MAX") else 0
 DISK_WARN = parse_threshold(os.environ["UPDOCK_DISK_WARN"], DISK_MAX) \
     if os.getenv("UPDOCK_DISK_WARN") else 0
-NOTIFIER = EmailNotifier.from_env(os.environ)
+NOTIFIER = EmailNotifier.from_env(ENV)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
