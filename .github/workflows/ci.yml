@@ -28,6 +28,8 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose -f compose.yaml config --quiet
       - run: docker compose -f compose.qnap.yaml config --quiet
+      - run: docker compose -f compose.yaml -f compose.socket-proxy.yaml config --quiet
+      - run: docker compose -f compose.qnap.yaml -f compose.socket-proxy.yaml config --quiet
 
   pytest:
     name: pytest
@@ -164,6 +166,41 @@ jobs:
           wait
           head -20 events.txt
           grep -q '^event: state' events.txt && grep -q '^event: log' events.txt
+      - name: Through a Docker socket proxy (no socket in the Updock container)
+        run: |
+          set -euo pipefail
+          docker network create dockerapi
+          docker run -d --name socket-proxy --network dockerapi --label updock.enable=false \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -e CONTAINERS=1 -e IMAGES=1 -e NETWORKS=1 -e POST=1 -e EXEC=1 -e SYSTEM=1 \
+            lscr.io/linuxserver/socket-proxy:latest
+          docker run -d --name app-proxied --network dockerapi -p 8082:8080 \
+            -e DOCKER_HOST=tcp://socket-proxy:2375 -e UPDOCK_INTERVAL=0 -e UPDOCK_HOOKS=true \
+            -e UPDOCK_DISK_WARN=500GB -e UPDOCK_STARTUP_GRACE=2 -e UPDOCK_API_TOKEN=proxy-token \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
+            "$IMAGE"
+          base=http://localhost:8082; auth='Authorization: Bearer proxy-token'
+          for i in $(seq 1 30); do curl -fsS "$base/readyz" && break; sleep 1; done; echo
+          docker run -d --name proxy-target --label 'updock.hook.pre-update=echo hook-ran' \
+            busybox:stable sleep 600
+          old="$(docker inspect -f '{{.Id}}' proxy-target)"
+          curl -fsS -H "$auth" -X POST "$base/api/containers/proxy-target/update?force=true"; echo
+          ok=0
+          for i in $(seq 1 60); do
+            new="$(docker inspect -f '{{.Id}}' proxy-target 2>/dev/null || true)"
+            if [ -n "$new" ] && [ "$new" != "$old" ] && \
+               curl -fsS -H "$auth" "$base/api/containers" | python3 -c \
+                 "import json,sys; c=[x for x in json.load(sys.stdin)['containers'] if x['name']=='proxy-target']; sys.exit(0 if c and c[0].get('job')=='updated' else 1)"; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          curl -fsS -H "$auth" "$base/api/logs?container=proxy-target" | python3 -c \
+            "import json,sys; [print(e['level'], e['msg']) for e in json.load(sys.stdin)['entries']]"
+          [ "$ok" = 1 ] || { echo "::error::recreate through the proxy failed"; exit 1; }
+          curl -fsS -H "$auth" "$base/api/logs?container=proxy-target&event=hook" | grep -q 'exited 0: hook-ran'
+          curl -fsS -H "$auth" "$base/api/disk" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(d); sys.exit(0 if d['enabled'] and d['used'] > 0 else 1)"
       - name: Scan image for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

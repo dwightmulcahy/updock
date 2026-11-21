@@ -89,3 +89,17 @@ def test_env_example_references_secret_files():
     for n in ("PASSWORD", "API_TOKEN", "SMTP_PASSWORD"):
         assert f"UPDOCK_{n}_FILE=/run/secrets/updock_{n.lower()}" in text
     assert "UPDOCK_PASSWORD=" not in text.replace("UPDOCK_PASSWORD=...", "")
+
+
+def test_socket_proxy_override_removes_socket_from_updock():
+    import yaml
+    doc = yaml.safe_load(open(os.path.join(ROOT, "compose.socket-proxy.yaml")).read()
+                         .replace("!override", ""))
+    proxy, updock = doc["services"]["socket-proxy"], doc["services"]["updock"]
+    assert proxy["labels"]["updock.enable"] == "false"
+    assert proxy["volumes"] == ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    assert not any("docker.sock" in v for v in updock["volumes"])
+    assert updock["environment"]["DOCKER_HOST"] == "tcp://socket-proxy:2375"
+    assert doc["networks"]["docker-api"]["internal"] is True
+    for k in ("CONTAINERS", "IMAGES", "NETWORKS", "POST"):
+        assert proxy["environment"][k] == "1"

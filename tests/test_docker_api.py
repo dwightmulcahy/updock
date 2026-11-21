@@ -398,3 +398,47 @@ def test_put_archive(mock_docker):
     s["handler"] = lambda r: httpx.Response(500, text="read-only file system")
     with pytest.raises(DockerError, match="read-only"):
         d.put_archive("c1", "/", b"TAR")
+
+
+# ---------- socket proxy denials ----------
+
+from app.docker_api import proxy_hint  # noqa: E402
+
+
+@pytest.mark.parametrize("method,path,hint", [
+    ("GET", "/containers/json", "enable CONTAINERS=1"),
+    ("GET", "/v1.47/images/x/json", "enable IMAGES=1"),
+    ("POST", "/containers/abc/exec", "enable CONTAINERS=1, EXEC=1, POST=1"),
+    ("POST", "/exec/e1/start", "enable EXEC=1, POST=1"),
+    ("POST", "/networks/n/connect", "enable NETWORKS=1, POST=1"),
+    ("GET", "/system/df", "enable SYSTEM=1"),
+    ("GET", "/_ping", "enable PING=1"),
+    ("DELETE", "/volumes/x", "enable POST=1"),
+    ("GET", "/info", "blocked by the Docker socket proxy"),
+])
+def test_proxy_hint(method, path, hint):
+    assert proxy_hint(method, path).endswith(hint)
+
+
+PROXY_403 = "<html><body><h1>403 Forbidden</h1>\nRequest forbidden by administrative rules.\n</body></html>"
+
+
+def test_proxy_403_explained(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(403, text=PROXY_403)
+    with pytest.raises(DockerError) as e:
+        d.disk_usage()
+    assert e.value.status == 403
+    assert str(e.value) == ("403: blocked by the Docker socket proxy; enable SYSTEM=1 "
+                            "(GET /system/df)")
+    with pytest.raises(DockerError, match="enable CONTAINERS=1, POST=1"):
+        d.start("abc")
+    with pytest.raises(DockerError, match="enable IMAGES=1, POST=1"):
+        d.pull("nginx")
+
+
+def test_engine_json_403_kept(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(403, text='{"message":"operation not permitted"}')
+    with pytest.raises(DockerError, match="operation not permitted"):
+        d.inspect("x")
