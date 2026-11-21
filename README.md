@@ -43,6 +43,8 @@ Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`.
 2. If the pulled image ID differs from the running one, it stops the container, renames it, creates a replacement with the same config (env, ports, volumes incl. anonymous ones, networks + aliases, labels, restart policy), and starts it.
 3. On failure it rolls back to the old container. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image (see below).
 
+Containers that share the updated container's network (`network_mode: container:<name>`, or Compose `network_mode: service:<name>`, e.g. apps behind a VPN container) are stopped first and recreated afterwards to join the new container's network. If the update rolls back, they are simply restarted.
+
 Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the new image's defaults apply; values you set yourself are kept.
 
 ### Versions

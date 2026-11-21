@@ -78,6 +78,7 @@ class FakeDocker:
         self.calls.append(f"containers:{all}")
         return [{"Id": c["Id"], "Names": [f"/{n}"], "Image": c["Config"]["Image"],
                  "ImageID": c["Image"], "State": "running", "Status": "Up",
+                 "HostConfig": {"NetworkMode": (c.get("HostConfig") or {}).get("NetworkMode")},
                  "Labels": c["Config"].get("Labels")} for n, c in self.ctrs.items()]
 
     def inspect(self, cid):
@@ -96,9 +97,11 @@ class FakeDocker:
     def stop(self, cid, t):
         self._maybe_fail("stop")
         self.stop_timeout = t
+        self.stopped = getattr(self, "stopped", []) + [cid]
 
     def start(self, cid):
         self._maybe_fail("start")
+        self.started = getattr(self, "started", []) + [cid]
 
     def rename(self, cid, name):
         self._maybe_fail(f"rename:{name}")
@@ -113,7 +116,8 @@ class FakeDocker:
         cid = f"new{self.next_id}".ljust(64, "0")
         self.created_body = body
         self.ctrs[name] = {"Id": cid, "Name": f"/{name}", "Image": self.tags[body["Image"]],
-                           "Config": {"Image": body["Image"], "Labels": body.get("Labels")}}
+                           "Config": {"Image": body["Image"], "Labels": body.get("Labels")},
+                           "HostConfig": body["HostConfig"], "State": {"Running": False}}
         return cid
 
     def connect(self, net, cid, cfg):

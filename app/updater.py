@@ -235,7 +235,17 @@ class Updater:
             self._log(f"deployed {new_ref}", container=name, event="deploy")
         self._locked(name, job)
 
-    def _recreate(self, ctr, image_ref=None, cleanup=True):
+    def dependents(self, cid, name):
+        """Containers sharing this container's network namespace (network_mode: container:X,
+        or Compose `network_mode: service:X`). They must be recreated to follow a new ID."""
+        modes = {f"container:{cid}", f"container:{name}"}
+        out = []
+        for c in self.d.containers(all=True):
+            if c["Id"] != cid and (c.get("HostConfig") or {}).get("NetworkMode") in modes:
+                out.append(self.d.inspect(c["Id"]))
+        return out
+
+    def _recreate(self, ctr, image_ref=None, cleanup=True, network_parent=None, start=None):
         name = ctr["Name"].lstrip("/")
         old_id, old_img = ctr["Id"], ctr["Image"]
         ref = image_ref or ctr["Config"]["Image"]
@@ -244,8 +254,19 @@ class Updater:
         except Exception:
             img_cfg = None
         body, extra = build_create_body(ctr, img_cfg, image_ref)
-        was_running = ctr["State"]["Running"]
+        if network_parent:
+            body["HostConfig"]["NetworkMode"] = f"container:{network_parent}"
+        was_running = ctr["State"]["Running"] if start is None else start
         timeout = ctr["Config"].get("StopTimeout") or 10
+
+        deps = self.dependents(old_id, name)
+        dep_running = {d["Id"]: d["State"]["Running"] for d in deps}
+        for d in deps:
+            dname = d["Name"].lstrip("/")
+            self._log(f"uses {name}'s network; stopping until {name} is back", container=dname,
+                      event="dependent")
+            if d["State"]["Running"]:
+                self.d.stop(d["Id"], d["Config"].get("StopTimeout") or 10)
 
         self._log(f"recreating from {ref} (old image {old_img[7:19]})", container=name,
                   event="recreate")
@@ -271,11 +292,36 @@ class Updater:
             self.d.rename(old_id, name)
             if was_running:
                 self.d.start(old_id)
+            self._restart_dependents(deps, dep_running)
             self._log("previous container restored", logging.WARNING, name, "rollback")
             raise
         self.d.remove(old_id)
+        for d in deps:
+            self._recreate_dependent(d, new_id, dep_running[d["Id"]], name)
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
             self.remove_old_image(old_img, ref)
+        return new_id
+
+    def _restart_dependents(self, deps, dep_running):
+        for d in deps:
+            if dep_running[d["Id"]]:
+                try:
+                    self.d.start(d["Id"])
+                except Exception as e:
+                    self._log(f"could not restart: {e}", logging.ERROR, d["Name"].lstrip("/"),
+                              "dependent")
+
+    def _recreate_dependent(self, dep, parent_id, was_running, parent_name):
+        dname = dep["Name"].lstrip("/")
+        try:
+            self._recreate(dep, cleanup=False, network_parent=parent_id, start=was_running)
+            self._set(dname, job="recreated", message=f"followed {parent_name}",
+                      last_update=time.time())
+            self._log(f"recreated to join {parent_name}'s new network", container=dname,
+                      event="dependent")
+        except Exception as e:
+            self._set(dname, job="error", message=f"failed to follow {parent_name}: {e}")
+            self._log(f"failed to follow {parent_name}: {e}", logging.ERROR, dname, "dependent")
 
     def remove_old_image(self, old_img, ref):
         """Delete the superseded image: untag same-repo tags still pointing at it, then
