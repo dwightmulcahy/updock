@@ -31,6 +31,27 @@ container only so it can reach the mounted Docker socket.
 > Access to the Docker socket is equivalent to root on the host. Always set
 > `UPDOCK_PASSWORD` and don't expose port 8080 publicly.
 
+### Docker socket proxy
+
+Instead of mounting the Docker socket into Updock, you can put a [socket proxy](https://github.com/linuxserver/docker-socket-proxy) in front of it:
+
+```bash
+docker compose -f compose.yaml -f compose.socket-proxy.yaml up -d
+```
+
+Only the proxy mounts the socket (read-only); Updock talks to it over an internal network (`DOCKER_HOST=tcp://socket-proxy:2375`), and the proxy refuses every API section Updock doesn't need — volumes, builds, swarm, secrets, plugins, system-wide changes. The proxy is labelled `updock.enable=false` so Updock never stops the proxy it depends on.
+
+| Proxy setting | Needed for |
+|---|---|
+| `CONTAINERS=1`, `IMAGES=1`, `NETWORKS=1`, `POST=1` | always (checks, pulls, recreating containers, cleanup) |
+| `EXEC=1` | lifecycle hooks (`SOCKET_PROXY_EXEC=1` in `.env`) |
+| `SYSTEM=1` | disk space guard (`SOCKET_PROXY_SYSTEM=1` in `.env`) |
+| `PING=1` (default) | `/readyz` |
+
+If the proxy blocks a request, the error says which setting to enable (e.g. `blocked by the Docker socket proxy; enable SYSTEM=1`).
+
+Be realistic about what this buys: Updock still needs to create containers, and anything that may create containers can create a privileged one, so the proxy narrows the API surface and keeps the raw socket out of a web-facing container, but it does not make Updock unprivileged.
+
 State-changing requests from browsers must come from the Updock page itself
 (same origin, `Sec-Fetch-Site`, and an `X-Updock-Request` header), so another
 website can't use your saved login to trigger updates. Scripts and webhooks

@@ -1,0 +1,43 @@
+# Run Updock through a Docker socket proxy instead of giving it the Docker socket:
+#   docker compose -f compose.yaml -f compose.socket-proxy.yaml up -d
+# (QNAP: -f compose.qnap.yaml -f compose.socket-proxy.yaml)
+#
+# Only the proxy mounts the socket (read-only). Updock reaches it over an internal network
+# and can only use the API sections enabled below. See "Docker socket proxy" in README.md.
+services:
+  socket-proxy:
+    image: lscr.io/linuxserver/socket-proxy:${SOCKET_PROXY_TAG:-latest}
+    container_name: updock-socket-proxy
+    labels:
+      # Never let Updock update the proxy it talks through: stopping it mid-update would
+      # cut Updock off from Docker with the proxy down.
+      updock.enable: "false"
+    environment:
+      CONTAINERS: "1"   # list/inspect/create/start/stop/rename/remove, copy-file archives
+      IMAGES: "1"       # pull, inspect, remove old images
+      NETWORKS: "1"     # reattach extra networks
+      POST: "1"         # allow non-GET requests in the sections above (required)
+      EXEC: "${SOCKET_PROXY_EXEC:-0}"      # 1 = lifecycle hooks (UPDOCK_HOOKS)
+      SYSTEM: "${SOCKET_PROXY_SYSTEM:-0}"  # 1 = disk space guard (UPDOCK_DISK_MAX/WARN)
+      PING: "1"         # /readyz
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    read_only: true
+    tmpfs: [/run]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  updock:
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+    volumes: !override
+      - updock-data:/data
+      # - ~/.docker/config.json:/config/config.json:ro
+    networks: [default, docker-api]
+    depends_on: [socket-proxy]
+
+networks:
+  docker-api:
+    internal: true   # the proxy is reachable only from Updock, never from outside

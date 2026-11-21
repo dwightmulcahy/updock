@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,29 @@ class DockerError(Exception):
     def __init__(self, status, msg):
         super().__init__(f"{status}: {msg}")
         self.status = status
+
+
+# Docker socket proxies (Tecnativa / LinuxServer docker-socket-proxy) gate API sections by env var
+PROXY_SECTIONS = [(r"^/containers/[^/]+/exec", ("CONTAINERS", "EXEC")), (r"^/exec/", ("EXEC",)),
+                  (r"^/containers", ("CONTAINERS",)), (r"^/images", ("IMAGES",)),
+                  (r"^/networks", ("NETWORKS",)), (r"^/system", ("SYSTEM",)), (r"^/_ping", ("PING",))]
+
+
+def proxy_hint(method, path):
+    path = re.sub(r"^/v[\d.]+", "", path)
+    sections = next((s for rx, s in PROXY_SECTIONS if re.match(rx, path)), ())
+    needs = [f"{s}=1" for s in sections] + (["POST=1"] if method != "GET" else [])
+    return "blocked by the Docker socket proxy" + (f"; enable {', '.join(needs)}" if needs else "")
+
+
+def http_error(r, text):
+    """DockerError for a failed Engine API response, explaining socket-proxy denials (the
+    proxy answers 403 with an HTML page; the Engine itself answers with JSON)."""
+    text = (text or "").strip()
+    if r.status_code == 403 and not text.startswith("{"):
+        text = f"{proxy_hint(r.request.method, r.request.url.path)} " \
+               f"({r.request.method} {r.request.url.path})"
+    return DockerError(r.status_code, text)
 
 
 def split_ref(ref):
@@ -111,7 +135,7 @@ class Docker:
     def _req(self, method, path, **kw):
         r = self.c.request(method, path, **kw)
         if r.status_code >= 400:
-            raise DockerError(r.status_code, r.text.strip())
+            raise http_error(r, r.text)
         if r.content and r.headers.get("content-type", "").startswith("application/json"):
             return r.json()
         return None
@@ -139,7 +163,7 @@ class Docker:
         with self.c.stream("POST", "/images/create", params={"fromImage": repo, "tag": tag},
                            headers=headers) as r:
             if r.status_code >= 400:
-                raise DockerError(r.status_code, r.read().decode().strip())
+                raise http_error(r, r.read().decode(errors="replace"))
             for line in r.iter_lines():
                 if not line:
                     continue
@@ -165,12 +189,12 @@ class Docker:
     def stop(self, cid, t):
         r = self.c.post(f"/containers/{cid}/stop", params={"t": t})
         if r.status_code not in (204, 304):
-            raise DockerError(r.status_code, r.text)
+            raise http_error(r, r.text)
 
     def start(self, cid):
         r = self.c.post(f"/containers/{cid}/start")
         if r.status_code not in (204, 304):
-            raise DockerError(r.status_code, r.text)
+            raise http_error(r, r.text)
 
     def rename(self, cid, name):
         self._req("POST", f"/containers/{cid}/rename", params={"name": name})
@@ -195,7 +219,7 @@ class Docker:
             with self.c.stream("POST", f"/exec/{eid}/start", json={"Detach": False, "Tty": False},
                                timeout=httpx.Timeout(10, read=timeout or None)) as r:
                 if r.status_code >= 400:
-                    raise DockerError(r.status_code, r.read().decode().strip())
+                    raise http_error(r, r.read().decode(errors="replace"))
                 for chunk in r.iter_bytes():
                     if len(raw) < max_output:
                         raw += chunk
@@ -221,7 +245,7 @@ class Docker:
         data = b""
         with self.c.stream("GET", f"/containers/{cid}/archive", params={"path": path}) as r:
             if r.status_code >= 400:
-                raise DockerError(r.status_code, r.read().decode(errors="replace").strip())
+                raise http_error(r, r.read().decode(errors="replace"))
             for chunk in r.iter_bytes():
                 data += chunk
                 if len(data) > max_bytes:
@@ -233,12 +257,12 @@ class Docker:
         r = self.c.put(f"/containers/{cid}/archive", params={"path": path}, content=data,
                        headers={"Content-Type": "application/x-tar"})
         if r.status_code != 200:
-            raise DockerError(r.status_code, r.text.strip())
+            raise http_error(r, r.text)
 
     def restart(self, cid, t=10):
         r = self.c.post(f"/containers/{cid}/restart", params={"t": t})
         if r.status_code != 204:
-            raise DockerError(r.status_code, r.text)
+            raise http_error(r, r.text)
 
     def remove_image(self, ref):
         """Delete an image by ID, or untag it when given a tag."""
