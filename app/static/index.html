@@ -63,6 +63,7 @@
 <header>
   <h1>Updock <span class="meta" id="ver"></span></h1>
   <span class="meta" id="next"></span>
+  <button id="testmail" hidden onclick="testEmail()" title="Send a test notification email">Test email</button>
   <button onclick="post('/api/check-all')">Check all</button>
   <button class="primary" onclick="post('/api/update-all')">Update all</button>
 </header>
@@ -239,6 +240,19 @@ function downloadLogs(fmt) {
   const p = filterQuery(); p.set("fmt", fmt);
   location.href = "/api/logs/download?" + p;
 }
+
+async function testEmail() {
+  const btn = $("testmail"); btn.disabled = true; btn.textContent = "Sending…";
+  const r = await fetch("/api/notify/test", { method: "POST", headers: { "X-Updock-Request": "1" } });
+  const d = await r.json().catch(() => ({}));
+  alert(r.ok ? `Test email sent to ${d.to.join(", ")}` : (d.detail || "Test email failed"));
+  btn.disabled = false; btn.textContent = "Test email";
+  refreshLogs(true);
+}
+fetch("/api/notify").then(r => r.json()).then(n => {
+  const b = $("testmail"); b.hidden = !n.enabled;
+  b.title = n.enabled ? `Email ${n.events.join(", ")} to ${n.to.join(", ")} via ${n.server}` : "";
+}).catch(() => {});
 
 refresh(); setInterval(refresh, 3000);
 </script>

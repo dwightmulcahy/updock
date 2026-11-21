@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
+from .notify import EmailNotifier
 from .registry import REVISION_LABELS, VERSION_LABELS, RegistryError
 
 ENABLE_LABEL = "updock.enable"
@@ -103,7 +104,7 @@ def base_repo(ref):
 class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
-                 digest_check=True):
+                 digest_check=True, notifier=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -120,6 +121,7 @@ class Updater:
         self.startup_grace = startup_grace
         self.sleep, self.clock = sleep, clock
         self.digest_check = digest_check
+        self.notifier = notifier or EmailNotifier()  # disabled unless configured
         self._unpulled = set()  # containers whose newer image was found but not pulled yet
 
     @property
@@ -217,7 +219,7 @@ class Updater:
                   update_available=avail, last_check=time.time(), message="")
         return avail
 
-    def _locked(self, name, fn):
+    def _locked(self, name, fn, notify_errors=True):
         lock = self.locks[name]
         if not lock.acquire(blocking=False):
             self._log("job already running; request ignored", logging.WARNING, name, "busy")
@@ -227,8 +229,11 @@ class Updater:
         except UnhealthyError as e:
             self._set(name, job="rolled-back", message=str(e))
             self._log(f"rolled back: {e}", logging.ERROR, name, "rollback")
+            self.notifier.notify("rollback", name, f"update rolled back: {e}")
         except Exception as e:
             self._set(name, job="error", message=str(e))
+            if notify_errors:
+                self.notifier.notify("error", name, f"{type(e).__name__}: {e}")
             expected = isinstance(e, (DockerError, RegistryError))
             self._log(f"{type(e).__name__}: {e}", logging.ERROR, name, "error",
                       exc_info=None if expected else e)
@@ -258,6 +263,7 @@ class Updater:
                 self._set(name, job="rolled-back")
                 return
             self._set(name, job="updating", message="Recreating")
+            change = self._describe_change(ctr)  # before cleanup removes the old image
             try:
                 self._recreate(ctr, cleanup=True)
             except UnhealthyError:
@@ -268,13 +274,29 @@ class Updater:
                       message="", failed_image=None)
             self._log("updated" if avail else "recreated", container=name,
                       event="update" if avail else "recreate")
+            if avail:
+                self.notifier.notify("update", name, change)
         self._locked(name, job)
 
-    def check_only(self, name):
+    def check_only(self, name, scheduled=False):
         def job():
-            _, avail = self.check(name)
+            ctr, avail = self.check(name)
             self._log("update available" if avail else "up to date", container=name, event="check")
-        self._locked(name, job)
+            latest = (self.state[name].get("latest") or {})
+            key = latest.get("id") or latest.get("digest")
+            if scheduled and avail and key != self.state[name].get("notified_available"):
+                self.notifier.notify("available", name, self._describe_change(ctr))
+                self._set(name, notified_available=key)
+        self._locked(name, job, notify_errors=False)
+
+    def _describe_change(self, ctr):
+        """'test/app:latest 1.0.0 (8b0806bb9026) -> 2.0.0 (4b92afd055fd)'"""
+        name = ctr["Name"].lstrip("/")
+        old = self._image_info(ctr["Image"]) or {}
+        new = self.state[name].get("latest") or {}
+        fmt = lambda i: " ".join(x for x in (i.get("version") or "",
+                                              f"({i['id']})" if i.get("id") else "") if x) or "?"
+        return f"{ctr['Config']['Image']} {fmt(old)} -> {fmt(new)}"
 
     def tags(self, name):
         if not self.registry:
@@ -296,6 +318,7 @@ class Updater:
             self._set(name, job="deployed", ref=new_ref, update_available=False,
                       latest=None, last_update=time.time(), message="")
             self._log(f"deployed {new_ref}", container=name, event="deploy")
+            self.notifier.notify("deploy", name, f"deployed {new_ref}")
         self._locked(name, job)
 
     def dependents(self, cid, name):
@@ -419,6 +442,7 @@ class Updater:
         except Exception as e:
             self._set(dname, job="error", message=f"failed to follow {parent_name}: {e}")
             self._log(f"failed to follow {parent_name}: {e}", logging.ERROR, dname, "dependent")
+            self.notifier.notify("error", dname, f"failed to follow {parent_name}'s new network: {e}")
 
     def remove_old_image(self, old_img, ref):
         """Delete the superseded image: untag same-repo tags still pointing at it, then
@@ -453,11 +477,12 @@ class Updater:
     def run_all(self, update=True):
         t0 = time.monotonic()
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
-        for c in self.d.containers():
-            if self.eligible(c):
-                name = c["Names"][0].lstrip("/")
-                if update:
-                    self.update(name, scheduled=True)
-                else:
-                    self.check_only(name)
+        with self.notifier.batch():
+            for c in self.d.containers():
+                if self.eligible(c):
+                    name = c["Names"][0].lstrip("/")
+                    if update:
+                        self.update(name, scheduled=True)
+                    else:
+                        self.check_only(name, scheduled=True)
         self._log(f"run finished in {time.monotonic() - t0:.1f}s", event="run")
