@@ -1,0 +1,8 @@
+# Dev/test dependencies (pinned against requirements.txt). Recompile with:
+#   pip-compile --generate-hashes --strip-extras requirements-dev.in
+-c requirements.txt
+-r requirements.in
+pytest>=9.2.0
+pytest-cov>=7.1.0
+ruff>=0.17.5
+pyflakes>=4.1.0
