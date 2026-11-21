@@ -492,3 +492,87 @@ def test_expected_docker_errors_logged_without_traceback(up, fake):
     up.check_only("web")
     assert up.logs[-1]["msg"] == "DockerError: 404: manifest unknown"
     assert "exc" not in up.logs[-1]
+
+
+# ---------- network-namespace dependents ----------
+
+def add_dependent(fake, name="app", mode=f"container:{CID}", running=True):
+    dep = make_ctr(name, cid=name[0] * 64, State={"Running": running})
+    dep["HostConfig"]["NetworkMode"] = mode
+    return fake.add(dep)
+
+
+def test_dependent_recreated_on_parent_update(up, fake):
+    fake.add(make_ctr())
+    add_dependent(fake)
+    publish_new(fake)
+    up.update("web")
+    new_parent = fake.ctrs["web"]["Id"]
+    dep = fake.ctrs["app"]
+    assert dep["Id"] != "a" * 64
+    assert dep["HostConfig"]["NetworkMode"] == f"container:{new_parent}"
+    assert "NetworkingConfig" not in fake.created_body
+    assert fake.stopped.index("a" * 64) < fake.stopped.index(CID)  # dependent stopped first
+    assert dep["Id"] in fake.started
+    assert up.state["app"]["job"] == "recreated"
+    assert any(e["container"] == "app" and e["event"] == "dependent"
+               and "join web" in e["msg"] for e in up.logs)
+
+
+def test_dependent_by_name_and_stopped_not_started(up, fake):
+    fake.add(make_ctr())
+    add_dependent(fake, mode="container:web", running=False)
+    up.update("web", force=True)
+    dep = fake.ctrs["app"]
+    assert dep["HostConfig"]["NetworkMode"].startswith("container:new")
+    assert dep["Id"] not in fake.started and "a" * 64 not in fake.stopped
+
+
+def test_unrelated_containers_untouched(up, fake):
+    fake.add(make_ctr())
+    add_dependent(fake, name="other", mode="container:zzz")
+    up.update("web", force=True)
+    assert fake.ctrs["other"]["Id"] == "o" * 64
+
+
+def test_dependents_restarted_when_parent_rolls_back(up, fake):
+    fake.add(make_ctr())
+    add_dependent(fake)
+    publish_new(fake)
+    fake.fail["create"] = RuntimeError("boom")
+    up.update("web")
+    assert fake.ctrs["app"]["Id"] == "a" * 64  # not recreated
+    assert fake.started == [CID, "a" * 64]  # parent restored, then dependent
+
+
+def test_dependent_restart_failure_logged(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    add_dependent(fake)
+    fake.fail["create"] = RuntimeError("boom")
+    real = fake.start
+    monkeypatch.setattr(fake, "start", lambda cid: (_ for _ in ()).throw(RuntimeError("no net"))
+                        if cid == "a" * 64 else real(cid))
+    up.update("web", force=True)
+    assert any(e["container"] == "app" and "could not restart: no net" in e["msg"]
+               for e in up.logs)
+
+
+def test_dependent_recreate_failure_does_not_fail_parent(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    add_dependent(fake)
+    publish_new(fake)
+    real = fake.create
+    monkeypatch.setattr(fake, "create", lambda name, body: (_ for _ in ()).throw(
+        RuntimeError("bad dep")) if name == "app" else real(name, body))
+    up.update("web")
+    assert up.state["web"]["job"] == "updated"
+    assert up.state["app"]["job"] == "error" and "failed to follow web" in up.state["app"]["message"]
+    assert fake.ctrs["app"]["Id"] == "a" * 64  # rolled back to original dependent
+
+
+def test_stopped_dependent_not_restarted_on_rollback(up, fake):
+    fake.add(make_ctr())
+    add_dependent(fake, running=False)
+    fake.fail["create"] = RuntimeError("boom")
+    up.update("web", force=True)
+    assert fake.started == [CID]
