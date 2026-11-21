@@ -1370,3 +1370,81 @@ def test_deploy_runs_update_hooks(kup, fake):
     fake.tags["test/app:1.0"] = OLD_IMG
     kup.deploy("web", "1.0")
     assert [argv[-1] for _, argv, _ in fake.execs] == ["pu"]
+
+
+# ---------- disk usage guard ----------
+
+@pytest.fixture
+def gup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.usage = {"used": 10_000, "reclaimable": 2_000, "images": 3}
+
+    def disk_usage():
+        if isinstance(fake.usage, Exception):
+            raise fake.usage
+        return fake.usage
+    fake.disk_usage = disk_usage
+    fake.add(make_ctr())
+    publish_new(fake)
+    return lambda **kw: Updater(fake, notifier=RecNotifier(), **kw)
+
+
+def test_disk_guard_off(gup, fake):
+    u = gup()
+    assert u.disk_status() == {"enabled": False}
+    u.run_all()
+    assert fake.ctrs["web"]["Image"] == NEW_IMG
+
+
+def test_disk_blocked_run_only_checks(gup, fake):
+    u = gup(disk_max=5_000)
+    u.run_all()
+    assert fake.ctrs["web"]["Image"] == OLD_IMG and u.state["web"]["job"] == "update-available"
+    e = next(e for e in u.logs if e["event"] == "disk")
+    assert e["level"] == "ERROR" and "this run only checks (2.0 KB reclaimable)" in e["msg"]
+    assert [(ev, c) for ev, c, _ in u.notifier.batches[0]][0] == ("disk", None)
+
+
+def test_disk_warning_continues_and_alerts_once(gup, fake):
+    u = gup(disk_max=50_000, disk_warn=8_000)
+    u.run_all()
+    assert fake.ctrs["web"]["Image"] == NEW_IMG
+    assert any(e["level"] == "WARNING" and "warning level of 8.0 KB" in e["msg"] for e in u.logs)
+    u.run_all()
+    disk_alerts = [x for b in u.notifier.batches for x in b if x[0] == "disk"]
+    assert len(disk_alerts) == 1
+
+
+def test_disk_ok_resets_alert(gup, fake):
+    u = gup(disk_warn=8_000)
+    u.run_all()
+    fake.usage = {"used": 1_000, "reclaimable": 0, "images": 1}
+    u.run_all()
+    fake.usage = {"used": 9_000, "reclaimable": 0, "images": 1}
+    u.run_all()
+    assert len([x for b in u.notifier.batches for x in b if x[0] == "disk"]) == 2
+    assert u.disk_status()["status"] == "warning"
+
+
+def test_disk_unreadable_fails_closed(gup, fake):
+    fake.usage = RuntimeError("df failed")
+    u = gup(disk_max=5_000)
+    u.run_all()
+    assert fake.ctrs["web"]["Image"] == OLD_IMG
+    assert any("could not read Docker disk usage (df failed)" in e["msg"] for e in u.logs)
+
+
+def test_disk_gate_not_used_for_check_only_runs(gup, fake):
+    fake.usage = RuntimeError("should not be called")
+    u = gup(disk_max=5_000)
+    u.run_all(update=False)
+    assert not any(e["event"] == "disk" for e in u.logs)
+
+
+def test_disk_status_cache(gup, fake):
+    u = gup(disk_max=50_000)
+    first = u.disk_status(max_age=60)
+    fake.usage = {"used": 1, "reclaimable": 0, "images": 0}
+    assert u.disk_status(max_age=60) is first
+    assert u.disk_status()["used"] == 1
+    assert first["max"] == 50_000 and first["warn"] is None

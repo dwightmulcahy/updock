@@ -360,3 +360,13 @@ def test_pin_endpoint(client, up):
     up.pin.assert_called_with("web", False)
     up.pin.side_effect = KeyError("ghost")
     assert client.post("/api/containers/ghost/pin").status_code == 404
+
+
+
+def test_disk_endpoint(client, up):
+    up.disk_status.return_value = {"enabled": True, "used": 5, "status": "ok"}
+    assert client.get("/api/disk").json()["used"] == 5
+    up.disk_status.assert_called_with(max_age=60)
+    up.disk_status.side_effect = RuntimeError("no df")
+    r = client.get("/api/disk")
+    assert r.status_code == 502 and "no df" in r.json()["detail"]

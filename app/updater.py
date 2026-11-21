@@ -10,6 +10,7 @@ from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import REVISION_LABELS, VERSION_LABELS, RegistryError
 from .schedule import format_duration, parse_duration, parse_timestamp
+from .units import format_size
 
 ENABLE_LABEL = "updock.enable"
 COOLDOWN_LABEL = "updock.cooldown"
@@ -163,7 +164,7 @@ class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
                  digest_check=True, notifier=None, store=None, include_stopped=False,
-                 cooldown=0, hooks=False):
+                 cooldown=0, hooks=False, disk_max=0, disk_warn=0):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -185,6 +186,8 @@ class Updater:
         self.include_stopped = include_stopped
         self.cooldown = cooldown
         self.hooks = hooks
+        self.disk_max, self.disk_warn = disk_max, disk_warn
+        self._disk, self._disk_alerted = None, "ok"
         self._bad_labels = set()
         if store:
             for name, st in store.load_state().items():
@@ -713,10 +716,52 @@ class Updater:
             self._log(f"could not remove old image {short}: {e}", logging.WARNING, event="cleanup")
             return False
 
+    def disk_status(self, max_age=0):
+        """Measure Docker image storage against the configured limits (cached `max_age` s)."""
+        if not (self.disk_max or self.disk_warn):
+            return {"enabled": False}
+        if self._disk and max_age and time.time() - self._disk["t"] < max_age:
+            return self._disk
+        u = self.d.disk_usage()
+        used = u["used"]
+        status = ("blocked" if self.disk_max and used >= self.disk_max else
+                  "warning" if self.disk_warn and used >= self.disk_warn else "ok")
+        self._disk = {"enabled": True, **u, "max": self.disk_max or None,
+                      "warn": self.disk_warn or None, "status": status, "t": time.time()}
+        return self._disk
+
+    def _disk_gate(self):
+        """Return True if updates may proceed. Fails closed if usage can't be read."""
+        if not (self.disk_max or self.disk_warn):
+            return True
+        try:
+            d = self.disk_status()
+        except Exception as e:
+            status, ok = "unknown", False
+            msg = f"could not read Docker disk usage ({e}); skipping updates this run"
+        else:
+            status, ok = d["status"], d["status"] != "blocked"
+            used = format_size(d["used"])
+            msg = {"blocked": f"image storage {used} is at/over the limit of "
+                              f"{format_size(self.disk_max)}; this run only checks "
+                              f"({format_size(d['reclaimable'])} reclaimable)",
+                   "warning": f"image storage {used} is over the warning level of "
+                              f"{format_size(self.disk_warn)}",
+                   "ok": f"image storage {used}"}[status]
+        level = {"ok": logging.DEBUG, "warning": logging.WARNING}.get(status, logging.ERROR)
+        self._log(msg, level, event="disk")
+        if status != self._disk_alerted:
+            if status != "ok":
+                self.notifier.notify("disk", None, msg)
+            self._disk_alerted = status
+        return ok
+
     def run_all(self, update=True):
         t0 = time.monotonic()
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
         with self.notifier.batch():
+            if update and not self._disk_gate():
+                update = False
             for c in compose_order(self.d.containers(all=self.include_stopped)):
                 if self.eligible(c):
                     name = c["Names"][0].lstrip("/")

@@ -202,6 +202,15 @@ class Docker:
         code = self._req("GET", f"/exec/{eid}/json").get("ExitCode")
         return code, demux(raw[:max_output])
 
+    def disk_usage(self):
+        """Docker image storage: {'used': bytes, 'reclaimable': bytes, 'images': n}."""
+        df = self._req("GET", "/system/df", params={"type": "image"})
+        images = df.get("Images") or []
+        used = df.get("LayersSize") or sum(i.get("Size", 0) for i in images)
+        reclaimable = sum(max(i.get("Size", 0) - max(i.get("SharedSize", 0), 0), 0)
+                          for i in images if i.get("Containers", 0) <= 0)
+        return {"used": used, "reclaimable": reclaimable, "images": len(images)}
+
     def restart(self, cid, t=10):
         r = self.c.post(f"/containers/{cid}/restart", params={"t": t})
         if r.status_code != 204:

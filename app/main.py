@@ -18,6 +18,7 @@ from .notify import EmailNotifier
 from .registry import Registry
 from .schedule import Cron, Window, parse_duration
 from .store import Store
+from .units import parse_size, parse_threshold
 from .updater import Updater
 
 from . import logs as logmod
@@ -57,6 +58,9 @@ def init_store(directory, buf):
 
 
 STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
+DISK_MAX = parse_size(os.environ["UPDOCK_DISK_MAX"]) if os.getenv("UPDOCK_DISK_MAX") else 0
+DISK_WARN = parse_threshold(os.environ["UPDOCK_DISK_WARN"], DISK_MAX) \
+    if os.getenv("UPDOCK_DISK_WARN") else 0
 NOTIFIER = EmailNotifier.from_env(os.environ)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
@@ -65,7 +69,7 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
              include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False),
              cooldown=parse_duration(os.getenv("UPDOCK_COOLDOWN", "0")),
-             hooks=env_bool("UPDOCK_HOOKS", False))
+             hooks=env_bool("UPDOCK_HOOKS", False), disk_max=DISK_MAX, disk_warn=DISK_WARN)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -281,6 +285,14 @@ def deploy(name: str, tag: str):
     if not TAG_RE.match(tag):
         raise HTTPException(400, "invalid tag")
     return bg(up.deploy, name, tag)
+
+
+@app.get("/api/disk")
+def disk():
+    try:
+        return up.disk_status(max_age=60)
+    except Exception as e:
+        raise HTTPException(502, f"could not read disk usage: {e}")
 
 
 @app.get("/api/notify")

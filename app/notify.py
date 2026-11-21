@@ -11,10 +11,10 @@ from email.utils import formatdate, make_msgid
 
 log = logging.getLogger("updock")
 
-ALL_EVENTS = ("update", "rollback", "error", "available", "deploy")
-DEFAULT_EVENTS = ("update", "rollback", "error", "available")
+ALL_EVENTS = ("update", "rollback", "error", "available", "deploy", "disk")
+DEFAULT_EVENTS = ("update", "rollback", "error", "available", "disk")
 TITLES = {"update": "updated", "rollback": "rolled back", "error": "failed",
-          "available": "update available", "deploy": "deployed", "test": "test email"}
+          "available": "update available", "deploy": "deployed", "disk": "disk space", "test": "test email"}
 
 
 class EmailNotifier:

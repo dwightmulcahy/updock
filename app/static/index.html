@@ -69,6 +69,7 @@
 <body>
 <header>
   <h1>Updock <span class="meta" id="ver"></span></h1>
+  <span class="meta" id="disk" hidden></span>
   <span class="meta" id="next"></span>
   <button id="testmail" hidden onclick="testEmail()" title="Send a test notification email">Test email</button>
   <button onclick="post('/api/check-all')">Check all</button>
@@ -278,6 +279,18 @@ async function testEmail() {
   btn.disabled = false; btn.textContent = "Test email";
   refreshLogs(true);
 }
+async function refreshDisk() {
+  const d = await fetch("/api/disk").then(r => r.json()).catch(() => null), el = $("disk");
+  if (!d || !d.enabled) { el.hidden = true; return; }
+  const gb = b => (b / 1e9).toFixed(1) + " GB";
+  el.hidden = false;
+  el.textContent = `Images ${d.used != null ? gb(d.used) : "?"}${d.max ? " / " + gb(d.max) : ""}`;
+  el.style.color = d.status === "blocked" ? "var(--err)" : d.status === "warning" ? "var(--warn)" : "";
+  el.title = `${d.images} images, ${gb(d.reclaimable)} reclaimable` +
+    (d.warn ? `, warn at ${gb(d.warn)}` : "") + (d.status === "blocked" ? " — updates paused" : "");
+}
+refreshDisk(); setInterval(refreshDisk, 60000);
+
 fetch("/api/notify").then(r => r.json()).then(n => {
   const b = $("testmail"); b.hidden = !n.enabled;
   b.title = n.enabled ? `Email ${n.events.join(", ")} to ${n.to.join(", ")} via ${n.server}` : "";

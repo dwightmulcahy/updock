@@ -350,3 +350,15 @@ def test_exec_run_total_timeout(mock_docker, monkeypatch):
     monkeypatch.setattr(docker_api.time, "monotonic", lambda: next(ticks))
     with pytest.raises(TimeoutError, match="after 2s"):
         d.exec_run("c1", ["sh", "-c", "true"], timeout=2)
+
+
+def test_disk_usage(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(200, json={"LayersSize": 1000, "Images": [
+        {"Size": 600, "SharedSize": 100, "Containers": 0},
+        {"Size": 300, "SharedSize": -1, "Containers": 1},
+        {"Size": 50, "SharedSize": 80, "Containers": -1}]})
+    assert d.disk_usage() == {"used": 1000, "reclaimable": 500, "images": 3}
+    assert s["requests"][-1].url.params["type"] == "image"
+    s["handler"] = lambda r: httpx.Response(200, json={"Images": [{"Size": 5}]})
+    assert d.disk_usage()["used"] == 5
