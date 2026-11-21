@@ -215,6 +215,26 @@ class Docker:
                           for i in images if i.get("Containers", 0) <= 0)
         return {"used": used, "reclaimable": reclaimable, "images": len(images)}
 
+    def get_archive(self, cid, path, max_bytes):
+        """Tar of `path` in the container (works when stopped). Raises DockerError(413) if the
+        archive would exceed `max_bytes`, DockerError(404) if the path doesn't exist."""
+        data = b""
+        with self.c.stream("GET", f"/containers/{cid}/archive", params={"path": path}) as r:
+            if r.status_code >= 400:
+                raise DockerError(r.status_code, r.read().decode(errors="replace").strip())
+            for chunk in r.iter_bytes():
+                data += chunk
+                if len(data) > max_bytes:
+                    raise DockerError(413, f"{path} is larger than {max_bytes} bytes")
+        return data
+
+    def put_archive(self, cid, path, data):
+        """Extract a tar into the container at `path` (missing parent dirs are created)."""
+        r = self.c.put(f"/containers/{cid}/archive", params={"path": path}, content=data,
+                       headers={"Content-Type": "application/x-tar"})
+        if r.status_code != 200:
+            raise DockerError(r.status_code, r.text.strip())
+
     def restart(self, cid, t=10):
         r = self.c.post(f"/containers/{cid}/restart", params={"t": t})
         if r.status_code != 204:
