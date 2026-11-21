@@ -27,6 +27,7 @@
   .update-available { background:#3a2e14; color:var(--warn); }
   .pulling,.updating { background:#14263f; color:var(--accent); }
   .error { background:#3d1a1a; color:var(--err); }
+  .rolled-back { background:#3d2a14; color:var(--warn); }
   .msg { color:var(--err); font-size:12px; max-width:320px; }
   .actions { display:flex; gap:6px; justify-content:flex-end; }
   .logpanel { margin-top:24px; background:var(--panel); border-radius:8px; }
@@ -153,7 +154,7 @@ async function refresh() {
         <td>${c.latest ? (c.current && c.latest.id === c.current.id ? '<span class="img">same as running</span>' : imgCell(c.latest, "newer")) : '<span class="img">not checked</span>'}</td>
         <td>${esc(c.status)}</td>
         <td><span class="badge ${esc(c.job)}">${esc(c.job || "unchecked")}</span>
-            ${c.job === "error" ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
+            ${(c.job === "error" || c.job === "rolled-back") && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
         <td>${ago(c.last_check)}</td>
         <td><div class="actions">
           <button ${dis} onclick="post('/api/containers/${n}/check')">Check</button>

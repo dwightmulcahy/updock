@@ -277,7 +277,7 @@ def test_update_rollback(up, fake, op):
     assert up.state["web"]["job"] == "error"
     assert fake.ctrs["web"]["Id"] == CID  # old container restored
     assert set(fake.ctrs) == {"web"}
-    assert any("rolling back" in l["msg"] for l in up.logs)
+    assert any(f"{op} failed; rolling back" in e["msg"] for e in up.logs)
     assert fake.calls.count("start") == (2 if op == "start" else 1)
 
 
@@ -303,11 +303,11 @@ def test_run_all(up, fake, monkeypatch):
     skip["Config"]["Labels"] = {"updock.enable": "false"}
     fake.add(skip)
     seen = []
-    monkeypatch.setattr(up, "update", lambda n: seen.append(("u", n)))
+    monkeypatch.setattr(up, "update", lambda n, scheduled=False: seen.append(("u", n, scheduled)))
     monkeypatch.setattr(up, "check_only", lambda n: seen.append(("c", n)))
     up.run_all()
     up.run_all(update=False)
-    assert seen == [("u", "web"), ("c", "web")]
+    assert seen == [("u", "web", True), ("c", "web")]
     assert up.logs[-1]["msg"].startswith("run finished in ")
 
 
@@ -576,3 +576,140 @@ def test_stopped_dependent_not_restarted_on_rollback(up, fake):
     fake.fail["create"] = RuntimeError("boom")
     up.update("web", force=True)
     assert fake.started == [CID]
+
+
+
+# ---------- health-verified updates ----------
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.t += s
+
+
+@pytest.fixture
+def hup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    clk = Clock()
+    u = Updater(fake, health_timeout=60, startup_grace=10, sleep=clk.sleep, clock=clk)
+    u.clk = clk
+    return u
+
+
+HC = {"Test": ["CMD", "true"]}
+
+
+def script_new_container(fake, monkeypatch, states, healthcheck=None):
+    """Make inspect() of the replacement container return `states` in order
+    (a state may carry a RestartCount, which is lifted to the top level)."""
+    real = fake.inspect
+    seq = iter(states)
+
+    def inspect(cid):
+        c = real(cid)
+        if c["Id"].startswith("new"):
+            c["Config"]["Healthcheck"] = healthcheck
+            st = dict(next(seq, states[-1]))
+            c["RestartCount"] = st.pop("RestartCount", 0)
+            c["State"] = st
+        return c
+    monkeypatch.setattr(fake, "inspect", inspect)
+
+
+def test_no_healthcheck_waits_grace_then_succeeds(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": True}])
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+    assert hup.clk.t >= 10 and all(s <= 2 for s in hup.clk.sleeps)
+    assert CID not in [c["Id"] for c in fake.ctrs.values()]
+
+
+def test_healthcheck_becomes_healthy(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    publish_new(fake)
+    starting = {"Running": True, "Health": {"Status": "starting"}}
+    script_new_container(fake, monkeypatch,
+                         [starting, starting, {"Running": True, "Health": {"Status": "healthy"}}], HC)
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+    assert any(e["event"] == "health" and e["msg"] == "new container is healthy" for e in hup.logs)
+
+
+@pytest.mark.parametrize("states,hc,reason", [
+    ([{"Running": False, "ExitCode": 3}], None, "exited (code 3)"),
+    ([{"Running": True}, {"Running": True, "Restarting": True, "ExitCode": 1}], None, "exited (code 1)"),
+    ([{"Running": True}, {"Running": True, "ExitCode": 1, "RestartCount": 1}], None,
+     "crashed and was restarted (exit code 1)"),
+    ([{"Running": True, "Health": {"Status": "unhealthy", "Log": [{"Output": " db refused \n"}]}}],
+     HC, "unhealthy: db refused"),
+    ([{"Running": True, "Health": {"Status": "unhealthy", "Log": []}}], HC, "is unhealthy"),
+    ([{"Running": True, "Health": {"Status": "starting"}}], HC, "not healthy after 60s"),
+])
+def test_unhealthy_rolls_back(hup, fake, monkeypatch, states, hc, reason):
+    fake.add(make_ctr())
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, states, hc)
+    hup.update("web")
+    assert fake.ctrs["web"]["Id"] == CID and set(fake.ctrs) == {"web"}
+    st = hup.state["web"]
+    assert st["job"] == "rolled-back" and reason in st["message"]
+    assert st["failed_image"] == "new"
+    assert OLD_IMG in fake.images  # nothing cleaned up
+    e = hup.logs[-1]
+    assert e["level"] == "ERROR" and e["event"] == "rollback" and "exc" not in e
+
+
+def test_healthcheck_none_treated_as_absent(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": True}], {"Test": ["NONE"]})
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+
+
+def test_stopped_container_not_verified(hup, fake, monkeypatch):
+    fake.add(make_ctr(State={"Running": False}))
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 0}])
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+
+
+def test_scheduled_run_skips_image_that_failed(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 1}])
+    hup.update("web")
+    creates = fake.calls.count("create")
+    hup.update("web", scheduled=True)
+    assert fake.calls.count("create") == creates
+    assert "failed its health check before" in hup.logs[-1]["msg"]
+    assert hup.state["web"]["job"] == "rolled-back"
+    # manual retry still attempts it, and success clears the marker
+    monkeypatch.undo()
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated" and hup.state["web"]["failed_image"] is None
+
+
+def test_force_recreate_rollback_does_not_mark_image(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    script_new_container(fake, monkeypatch, [{"Running": False}])
+    hup.update("web", force=True)
+    assert hup.state["web"]["job"] == "rolled-back" and "failed_image" not in hup.state["web"]
+
+
+def test_deploy_rolls_back_when_unhealthy(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    fake.tags["test/app:1.0"] = OLD_IMG
+    script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 2}])
+    hup.deploy("web", "1.0")
+    assert hup.state["web"]["job"] == "rolled-back" and fake.ctrs["web"]["Id"] == CID
