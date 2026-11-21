@@ -1831,3 +1831,56 @@ def test_tag_info_includes_changelog(fake):
     u = Updater(fake, registry=reg)
     assert u.tag_info("web", "3.1")["changelog"] == \
         "https://github.com/acme/app/releases?q=3.1&expanded=true"
+
+
+# ---------- revive stopped containers ----------
+
+def _stopped(fake, **labels):
+    c = make_ctr(State={"Running": False})
+    c["Config"]["Labels"].update(labels)
+    fake.add(c)
+    publish_new(fake)
+    return c
+
+
+def test_stopped_container_stays_stopped_by_default(fake):
+    _stopped(fake)
+    u = Updater(fake)
+    u.update("web")
+    assert u.state["web"]["job"] == "updated" and not getattr(fake, "started", [])
+
+
+def test_revive_starts_after_image_update(fake):
+    _stopped(fake)
+    u = Updater(fake, revive_stopped=True)
+    u.update("web")
+    new = fake.ctrs["web"]["Id"]
+    assert new.startswith("new") and fake.started == [new]
+    assert any("will be started after the update" in e["msg"] for e in u.logs)
+
+
+def test_revive_label_overrides_setting(fake):
+    _stopped(fake, **{"updock.revive": "false"})
+    Updater(fake, revive_stopped=True).update("web")
+    assert not getattr(fake, "started", [])
+    fake.ctrs.clear()
+    _stopped(fake, **{"updock.revive": "true"})
+    Updater(fake).update("web")
+    assert len(fake.started) == 1
+
+
+def test_revive_not_for_force_recreate_without_new_image(fake):
+    c = make_ctr(State={"Running": False})
+    fake.add(c)
+    Updater(fake, revive_stopped=True).update("web", force=True)
+    assert not getattr(fake, "started", [])
+
+
+def test_revive_failure_rolls_back_to_stopped_original(fake):
+    _stopped(fake)
+    u = Updater(fake, revive_stopped=True)
+    fake.fail["start"] = RuntimeError("port in use")
+    u.update("web")
+    assert fake.ctrs["web"]["Id"] == CID and u.state["web"]["job"] == "error"
+    assert fake.calls.count("start") == 1  # only the failed revive; the original stays stopped
+    assert "stop" not in fake.calls
