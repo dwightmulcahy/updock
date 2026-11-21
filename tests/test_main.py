@@ -155,6 +155,7 @@ def _run_scheduler(monkeypatch, runs, run_on_start="false", interval=150, cron=N
     monkeypatch.setattr(main, "INTERVAL", interval)
     monkeypatch.setattr(main, "CRON", cron)
     monkeypatch.setattr(main, "WINDOW", window)
+    monkeypatch.setattr(main, "JITTER", 0)
     ft = FakeTime()
     monkeypatch.setattr(main.time, "time", ft.time)
     monkeypatch.setattr(main.time, "sleep", ft.sleep)
@@ -224,8 +225,9 @@ def test_schedule_info_and_tz(monkeypatch):
     monkeypatch.setattr(main, "CRON", Cron("@daily"))
     monkeypatch.setattr(main, "WINDOW", Window("02:00-05:00"))
     monkeypatch.setattr(main, "TZ", main._tz("Europe/Berlin"))
-    assert main.schedule_info() == {"cron": "@daily", "interval": None, "window": "02:00-05:00",
-                                    "tz": "Europe/Berlin"}
+    monkeypatch.setattr(main, "JITTER", 60)
+    assert main.schedule_info() == {"cron": "@daily", "interval": None, "jitter": 60,
+                                    "window": "02:00-05:00", "tz": "Europe/Berlin"}
     monkeypatch.setattr(main, "CRON", None)
     monkeypatch.setattr(main, "INTERVAL", 0)
     assert main.schedule_info()["interval"] is None
@@ -453,3 +455,19 @@ def test_events_endpoint(client, monkeypatch):
         assert r.headers["cache-control"] == "no-cache"
         body = "".join(r.iter_text())
     assert "event: log" in body
+
+
+
+def test_next_due_jitter(monkeypatch):
+    from datetime import timezone
+    from app.schedule import Cron
+    monkeypatch.setattr(main, "CRON", None)
+    monkeypatch.setattr(main, "INTERVAL", 100)
+    monkeypatch.setattr(main, "JITTER", 30)
+    monkeypatch.setattr(main.random, "uniform", lambda a, b: b)
+    assert main.next_due(1000) == 1130
+    monkeypatch.setattr(main, "CRON", Cron("0 0 * * *"))
+    monkeypatch.setattr(main, "TZ", timezone.utc)
+    assert main.next_due(0) == 86400 + 30
+    monkeypatch.setattr(main, "JITTER", 0)
+    assert main.next_due(0) == 86400

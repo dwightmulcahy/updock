@@ -1,10 +1,14 @@
 """Minimal OCI distribution (registry v2) client: tags, manifest digests, image config."""
 import hashlib
 import re
+import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
 from .docker_api import registry_credentials, split_ref
+from .schedule import format_duration
 
 HUB_ALIASES = {"docker.io", "index.docker.io", "registry-1.docker.io"}
 MAX_PAGES = 5
@@ -21,6 +25,33 @@ REVISION_LABELS = ("org.opencontainers.image.revision", "org.label-schema.vcs-re
 
 class RegistryError(Exception):
     pass
+
+
+class RateLimited(RegistryError):
+    """The registry answered 429 (or Updock is backing off from an earlier 429)."""
+
+    def __init__(self, host, retry_after=None, waiting=False):
+        self.host, self.retry_after, self.waiting = host, retry_after, waiting
+        when = f"; next try in {format_duration(retry_after)}" if retry_after else ""
+        what = "backing off from" if waiting else "rate-limited by"
+        super().__init__(f"{what} {host}{when}")
+
+
+def retry_after_seconds(value, now=None):
+    """Parse a Retry-After header (seconds or HTTP date) into seconds, or None."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now if now is not None else time.time()
+    return max(0, int(when.timestamp() - now))
 
 
 def parse_repo(ref):
@@ -76,6 +107,9 @@ class Registry:
         if "service" in p:
             params["service"] = p["service"]
         r = self.c.get(p["realm"], params=params, auth=basic)
+        if r.status_code == 429:
+            raise RateLimited(parse_repo(repo_ref)[0],
+                              retry_after_seconds(r.headers.get("retry-after")))
         if r.status_code >= 400:
             raise RegistryError(f"token request failed: {r.status_code}")
         data = r.json()
@@ -93,6 +127,8 @@ class Registry:
             auth = self._token(r.headers.get("www-authenticate", ""), name, ref) or {}
             self._auth[(host, name)] = auth
             r = self._do(method, url, auth, **kw)
+        if r.status_code == 429:
+            raise RateLimited(host, retry_after_seconds(r.headers.get("retry-after")))
         return r
 
     def tags(self, ref):

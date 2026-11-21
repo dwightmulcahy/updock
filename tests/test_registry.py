@@ -260,3 +260,50 @@ def test_token_cached_across_requests(mk):
     r.digest("r.io/app")
     r.digest("r.io/app")
     assert len(issued) == 1
+
+
+
+# ---------- 429 handling ----------
+
+from app.registry import RateLimited, retry_after_seconds  # noqa: E402
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, None), ("", None), ("120", 120), ("soon", None),
+    ("Wed, 21 Oct 2015 07:28:00 GMT", 60),
+    ("Wed, 21 Oct 2015 07:28:00", 60),          # no zone: assume UTC
+    ("Wed, 21 Oct 2015 07:20:00 GMT", 0),       # in the past
+])
+def test_retry_after_seconds(value, expected):
+    from datetime import datetime, timezone
+    now = datetime(2015, 10, 21, 7, 27, tzinfo=timezone.utc).timestamp()
+    assert retry_after_seconds(value, now) == expected
+
+
+def test_retry_after_default_now():
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 0
+
+
+def test_rate_limited_message():
+    assert str(RateLimited("ghcr.io", 90)) == "rate-limited by ghcr.io; next try in 1m"
+    assert str(RateLimited("ghcr.io", None, waiting=True)) == "backing off from ghcr.io"
+
+
+def test_429_raises_rate_limited(mk):
+    r, _ = mk(lambda q: httpx.Response(429, headers={"retry-after": "30"}))
+    with pytest.raises(RateLimited) as e:
+        r.digest("ghcr.io/o/app")
+    assert e.value.host == "ghcr.io" and e.value.retry_after == 30
+    with pytest.raises(RateLimited):
+        r.tags("ghcr.io/o/app")
+
+
+def test_429_from_token_endpoint(mk):
+    def h(q):
+        if q.url.path == "/token":
+            return httpx.Response(429)
+        return httpx.Response(401, headers={"www-authenticate": 'Bearer realm="https://auth.r.io/token"'})
+    r, _ = mk(h)
+    with pytest.raises(RateLimited) as e:
+        r.digest("r.io/app")
+    assert e.value.host == "r.io" and e.value.retry_after is None

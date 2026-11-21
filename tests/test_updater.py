@@ -1622,3 +1622,107 @@ def test_write_failure_after_stop_rolls_back(fup, fake):
     assert fup.state["web"]["job"] == "error" and fake.ctrs["web"]["Id"] == CID
     assert set(fake.ctrs) == {"web"}
     assert any("no space; rolling back" in e["msg"] for e in fup.logs)
+
+
+
+# ---------- registry rate limits ----------
+
+from app.registry import RateLimited as _RL  # noqa: E402
+
+
+class LimitedRegistry(DigestRegistry):
+    def __init__(self, seq):
+        super().__init__()
+        self.seq, self.calls = list(seq), 0
+
+    def digest(self, ref):
+        self.calls += 1
+        r = self.seq.pop(0) if self.seq else "sha256:local"
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+@pytest.fixture
+def rup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"])
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("app.updater.time.time", lambda: clock["t"])
+    fake.add(make_ctr())
+    fake.add(make_ctr("db", cid="d" * 64))
+    def make(seq):
+        u = Updater(fake, registry=LimitedRegistry(seq))
+        u.clock = clock
+        return u
+    return make
+
+
+def test_429_backs_off_whole_registry_without_pull_fallback(rup, fake):
+    u = rup([_RL("registry-1.docker.io", None)])
+    u.check_only("web")
+    assert u.state["web"]["job"] == "rate-limited" and "next try in 1m" in u.state["web"]["message"]
+    assert "pull" not in fake.calls
+    u.check_only("db")  # same registry: not contacted at all
+    assert u.registry.calls == 1 and u.state["db"]["job"] == "rate-limited"
+    assert u.state["db"]["message"].startswith("backing off from registry-1.docker.io")
+    assert u.counters["result_rate_limited"] == 2
+    assert [e["level"] for e in u.logs if e["event"] == "rate-limit"][:2] == ["WARNING", "WARNING"]
+
+
+def test_backoff_doubles_honours_retry_after_and_resets(rup, fake):
+    u = rup([_RL("registry-1.docker.io", None), _RL("registry-1.docker.io", None),
+             _RL("registry-1.docker.io", 900)])
+    host = "registry-1.docker.io"
+    u.check_only("web")
+    assert u._backoff[host]["until"] == 1060
+    u.clock["t"] = 1061
+    u.check_only("web")
+    assert u._backoff[host]["until"] == 1061 + 120
+    u.clock["t"] = 2000
+    u.check_only("web")
+    assert u._backoff[host]["until"] == 2000 + 900  # Retry-After wins when longer
+    u.clock["t"] = 5000
+    u.check_only("web")  # success clears the backoff
+    assert host not in u._backoff and u.state["web"]["job"] == "up-to-date"
+
+
+def test_backoff_capped(rup, fake):
+    u = rup([])
+    u._backoff["registry-1.docker.io"] = {"hits": 30}
+    e = u._rate_limited(_RL("registry-1.docker.io"))
+    assert e.retry_after == 6 * 3600
+
+
+def test_pull_toomanyrequests_becomes_backoff(fake, monkeypatch):
+    from app.docker_api import DockerError
+    fake.add(make_ctr())
+    u = Updater(fake)
+    fake.fail["pull"] = DockerError(500, "toomanyrequests: You have reached your pull rate limit.")
+    u.check_only("web")
+    assert u.state["web"]["job"] == "rate-limited"
+    assert "registry-1.docker.io" in u._backoff
+    fake.fail.pop("pull")
+    u._backoff.clear()
+    u.check_only("web")
+    assert u.state["web"]["job"] == "up-to-date"
+
+
+def test_other_pull_errors_unchanged(fake):
+    from app.docker_api import DockerError
+    fake.add(make_ctr())
+    u = Updater(fake)
+    fake.fail["pull"] = DockerError(404, "manifest unknown")
+    u.check_only("web")
+    assert u.state["web"]["job"] == "error" and not u._backoff
+
+
+def test_update_pull_after_digest_rate_limited(fake):
+    from app.docker_api import DockerError
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"])
+    fake.add(make_ctr())
+    publish_new(fake)
+    u = Updater(fake, registry=DigestRegistry())
+    fake.fail["pull"] = DockerError(500, "Error response: 429 Too Many Requests")
+    u.update("web")
+    assert u.state["web"]["job"] == "rate-limited" and "create" not in fake.calls

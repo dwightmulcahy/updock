@@ -1,7 +1,8 @@
 """Prometheus text exposition (format 0.0.4) without a client library."""
 import time
 
-RESULTS = ("updated", "recreated", "rolled_back", "failed", "check_failed", "skipped", "cooldown")
+RESULTS = ("updated", "recreated", "rolled_back", "failed", "check_failed", "skipped", "cooldown",
+           "rate_limited")
 
 
 def _esc(v):
