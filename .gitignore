@@ -4,6 +4,9 @@
 !.env.example
 *.pem
 *.key
+# Secret files for Compose (see secrets/README.md): never commit them
+secrets/*
+!secrets/README.md
 
 # Node
 node_modules/

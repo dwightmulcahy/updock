@@ -11,7 +11,8 @@ Watchtower-style auto-updater for Docker containers, with a web UI to check, upd
 ## Quick start
 
 ```bash
-cp .env.example .env          # set UPDOCK_PASSWORD
+cp .env.example .env
+./scripts/init-secrets.sh     # random UI password + API token in ./secrets (prints the login)
 docker compose up -d --build
 curl http://localhost:8080/health
 # UI: http://localhost:8080
@@ -36,6 +37,18 @@ website can't use your saved login to trigger updates. Scripts and webhooks
 (curl, CI) are unaffected. Behind a reverse proxy that rewrites `Host`, list
 the public URL in `UPDOCK_ALLOWED_ORIGINS`. Responses also send a strict
 Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`.
+
+## Secrets
+
+Passwords and tokens are kept out of `.env`: they live as files in `./secrets` (git-ignored), Compose mounts them at `/run/secrets/<name>`, and `.env` points Updock at them:
+
+```dotenv
+UPDOCK_PASSWORD_FILE=/run/secrets/updock_password
+UPDOCK_API_TOKEN_FILE=/run/secrets/updock_api_token
+UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
+```
+
+`scripts/init-secrets.sh` creates all three (random password and token, empty SMTP password; never overwrites). An empty file means "not set"; a `*_FILE` pointing at a missing file stops Updock at startup rather than running without a password. Any `UPDOCK_<NAME>_FILE` overrides `UPDOCK_<NAME>`, and plain values still work. See [secrets/README.md](secrets/README.md).
 
 ## How it works
 
@@ -172,7 +185,7 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 | `UPDOCK_INCLUDE_STOPPED` | `false` | Let scheduled runs update stopped containers too (they stay stopped) |
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
-| `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth. Prefer `UPDOCK_PASSWORD_FILE` (see Secrets) |
 | `UPDOCK_DISK_MAX` | empty | Image storage limit (`40GB`, `20GiB`); at/over it scheduled runs only check |
 | `UPDOCK_DISK_WARN` | empty | Warning level: a size or a percentage of the max (`80%`) |
 | `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |

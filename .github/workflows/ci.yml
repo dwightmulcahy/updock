@@ -63,12 +63,19 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Start hardened container
         run: |
+          # secrets as files (chmod 600, owned by the runner user), like ./secrets with Compose
+          mkdir -p ci-secrets && umask 077
+          printf 'ci-secret\n' > ci-secrets/updock_password
+          printf 'ci-token' > ci-secrets/updock_api_token
           docker run -d --name app -p ${PORT}:8080 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v updock-ci-data:/data \
-            -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret -e UPDOCK_LOG_LEVEL=DEBUG -e UPDOCK_API_TOKEN=ci-token \
+            -v "$PWD/ci-secrets:/run/secrets:ro" \
+            -e UPDOCK_PASSWORD_FILE=/run/secrets/updock_password \
+            -e UPDOCK_API_TOKEN_FILE=/run/secrets/updock_api_token \
+            -e UPDOCK_INTERVAL=0 -e UPDOCK_LOG_LEVEL=DEBUG \
             --read-only --tmpfs /tmp \
-            --cap-drop ALL --security-opt no-new-privileges:true \
+            --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges:true \
             --pids-limit 200 --memory 256m \
             "$IMAGE"
       - name: Check /health
