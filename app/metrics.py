@@ -38,8 +38,9 @@ def render(up, rows, version, commit, log_counts):
               for s in sorted({r["state"] for r in rows})])
     w.metric("updock_containers_monitored", "gauge", "Containers Updock may update.",
              [({}, len(eligible))])
-    w.metric("updock_containers_pinned", "gauge", "Containers pinned to their current image.",
-             [({}, sum(1 for r in eligible if r.get("pinned")))])
+    w.metric("updock_containers_pinned", "gauge",
+             "Containers pinned in the UI or labelled monitor-only.",
+             [({}, sum(1 for r in eligible if r.get("pinned") or r.get("monitor_only")))])
     w.metric("updock_container_update_available", "gauge",
              "1 if a newer image was found at the last check.",
              [({"container": r["name"], "image": r["image"]}, 1 if r.get("update_available") else 0)

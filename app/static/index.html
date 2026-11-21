@@ -182,7 +182,7 @@ async function refresh() {
       const n = encodeURIComponent(c.name), dis = busy(c.job) || !c.eligible ? "disabled" : "";
       const pin = c.pinned ? "false" : "true";
       return `<tr class="${c.state === "running" ? "" : "stopped"}">
-        <td><b>${esc(c.name)}</b>${c.eligible ? "" : ' <span class="badge">excluded</span>'}${c.pinned ? ' <span class="badge pinned-badge" title="Scheduled runs only check this container">pinned</span>' : ""}</td>
+        <td><b>${esc(c.name)}</b>${c.eligible ? "" : ` <span class="badge" title="${esc(c.excluded || "")}">excluded</span>`}${c.pinned ? ' <span class="badge pinned-badge" title="Scheduled runs only check this container">pinned</span>' : ""}${c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge" title="Label updock.monitor-only: scheduled runs only check it">monitor only</span>' : ""}</td>
         <td><div>${esc(c.image)}</div>${imgCell(c.current)}</td>
         <td>${c.latest ? (c.current && c.latest.id === c.current.id ? '<span class="img">same as running</span>' : imgCell(c.latest, "newer")) : '<span class="img">not checked</span>'}</td>
         <td>${esc(c.status)}</td>

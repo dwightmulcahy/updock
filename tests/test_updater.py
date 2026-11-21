@@ -126,17 +126,75 @@ def publish_new(fake, ref="test/app:latest"):
     fake.tags[ref] = NEW_IMG
 
 
+def entry_of(name="web", image="test/app:latest", cid=CID, **labels):
+    return {"Id": cid, "Names": [f"/{name}"], "Image": image, "Labels": labels or None}
+
+
 def test_eligible_rules(up):
-    assert up.eligible({"Id": CID, "Labels": None})
-    assert not up.eligible({"Id": CID, "Labels": {"updock.enable": "false"}})
-    assert not up.eligible({"Id": CID, "Labels": {"updock.self": "true"}})
-    assert not up.eligible({"Id": "selfhost123", "Labels": {}})
+    assert up.eligible(entry_of())
+    assert up.exclusion(entry_of(**{"updock.enable": "false"})) == "label updock.enable=false"
+    assert up.exclusion(entry_of(**{"updock.self": "true"})) == "this is Updock"
+    assert up.exclusion(entry_of(cid="selfhost123")) == "this is Updock"
 
 
 def test_eligible_label_enable(fake):
     u = Updater(fake, label_enable=True)
-    assert not u.eligible({"Id": CID, "Labels": {}})
-    assert u.eligible({"Id": CID, "Labels": {"updock.enable": "true"}})
+    assert u.exclusion(entry_of()) == "no updock.enable=true label"
+    assert u.eligible(entry_of(**{"updock.enable": "true"}))
+
+
+def test_scope(fake):
+    plain, scoped = entry_of(), entry_of(**{"updock.scope": "nas"})
+    u = Updater(fake)
+    assert u.eligible(plain)
+    assert u.exclusion(scoped) == "scope 'nas' belongs to another Updock"
+    u = Updater(fake, scope="nas")
+    assert u.eligible(scoped) and u.exclusion(plain) == "not in scope 'nas'"
+    assert u.exclusion(entry_of(**{"updock.scope": "other"})) == "scope 'other' belongs to another Updock"
+
+
+def test_name_and_image_patterns(fake):
+    u = Updater(fake, exclude_names=["db-*", "", "cache"], exclude_images=["*:pinned"],
+                include_images=["test/*", "ghcr.io/acme/*"])
+    assert u.eligible(entry_of())
+    assert u.exclusion(entry_of("db-main")) == "name matches UPDOCK_EXCLUDE 'db-*'"
+    assert u.exclusion(entry_of("cache")) == "name matches UPDOCK_EXCLUDE 'cache'"
+    assert u.eligible(entry_of("cache2"))
+    assert u.exclusion(entry_of(image="nginx:1")) == "image doesn't match UPDOCK_INCLUDE_IMAGES"
+    assert u.eligible(entry_of(image="ghcr.io/acme/api:2"))
+    assert u.exclusion(entry_of(image="test/app:pinned")) == "image matches UPDOCK_EXCLUDE_IMAGES '*:pinned'"
+
+
+def test_image_pattern_uses_known_ref_when_tag_moved(fake):
+    u = Updater(fake, include_images=["test/*"])
+    e = entry_of(image="sha256:abc")
+    assert not u.eligible(e)
+    u.state["web"]["ref"] = "test/app:latest"
+    assert u.eligible(e)
+
+
+def test_monitor_only_label_scheduled_runs_only_check(fake, monkeypatch):
+    c = make_ctr()
+    c["Config"]["Labels"]["updock.monitor-only"] = "true"
+    fake.add(c)
+    fake.add(make_ctr("db", cid="d" * 64))
+    u = Updater(fake)
+    seen = []
+    monkeypatch.setattr(u, "update", lambda n, scheduled=False: seen.append(("u", n)))
+    monkeypatch.setattr(u, "check_only", lambda n, scheduled=False: seen.append(("c", n)))
+    u.run_all()
+    assert sorted(seen) == [("c", "web"), ("u", "db")]
+    rows = {r["name"]: r for r in u.list()}
+    assert rows["web"]["monitor_only"] is True and rows["db"]["monitor_only"] is False
+    assert u.monitor_only("web", {"updock.monitor-only": "YES"})
+    assert not u.monitor_only("web", {"updock.monitor-only": "no"})
+
+
+def test_list_shows_exclusion_reason(fake):
+    u = Updater(fake, exclude_names=["web"])
+    fake.add(make_ctr())
+    row = u.list()[0]
+    assert row["eligible"] is False and row["excluded"] == "name matches UPDOCK_EXCLUDE 'web'"
 
 
 def test_list_sorted_with_state(up, fake):
