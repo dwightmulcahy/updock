@@ -101,6 +101,9 @@ class FakeDocker:
 
     def start(self, cid):
         self._maybe_fail("start")
+        for c in self.ctrs.values():
+            if c["Id"] == cid:
+                c["State"] = {**c.get("State", {}), "Running": True}
         self.started = getattr(self, "started", []) + [cid]
 
     def rename(self, cid, name):
@@ -118,6 +121,7 @@ class FakeDocker:
         self.ctrs[name] = {"Id": cid, "Name": f"/{name}", "Image": self.tags[body["Image"]],
                            "Config": {"Image": body["Image"], "Labels": body.get("Labels")},
                            "HostConfig": body["HostConfig"], "State": {"Running": False}}
+        self.ctrs[name]["Config"]["Healthcheck"] = body.get("Healthcheck")
         return cid
 
     def connect(self, net, cid, cfg):

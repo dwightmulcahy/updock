@@ -20,6 +20,10 @@ REVISION_LABELS = ("org.opencontainers.image.revision", "org.label-schema.vcs-re
 log = logging.getLogger("updock")
 
 
+class UnhealthyError(Exception):
+    """The replacement container failed its healthcheck or exited during startup."""
+
+
 def build_create_body(ctr, old_img_cfg, image_ref=None):
     """Turn `docker inspect` output into a /containers/create body, letting
     values that came from the old image fall back to the new image's defaults."""
@@ -100,7 +104,8 @@ def base_repo(ref):
 
 
 class Updater:
-    def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None):
+    def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
+                 health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -113,6 +118,9 @@ class Updater:
         self.logbuf = logbuf
         self.self_id = os.getenv("HOSTNAME", "")
         self._img_cache = {}
+        self.health_timeout = health_timeout
+        self.startup_grace = startup_grace
+        self.sleep, self.clock = sleep, clock
 
     @property
     def logs(self):
@@ -178,6 +186,9 @@ class Updater:
             return
         try:
             fn()
+        except UnhealthyError as e:
+            self._set(name, job="rolled-back", message=str(e))
+            self._log(f"rolled back: {e}", logging.ERROR, name, "rollback")
         except Exception as e:
             self._set(name, job="error", message=str(e))
             expected = isinstance(e, (DockerError, RegistryError))
@@ -186,7 +197,7 @@ class Updater:
         finally:
             lock.release()
 
-    def update(self, name, force=False):
+    def update(self, name, force=False, scheduled=False):
         def job():
             try:
                 ctr, avail = self.check(name)
@@ -199,10 +210,22 @@ class Updater:
             if not (avail or force):
                 self._log("up to date", container=name, event="check")
                 return
+            target = (self.state[name].get("latest") or {}).get("id")
+            failed = self.state[name].get("failed_image")
+            if scheduled and avail and target and target == failed:
+                self._log(f"skipping image {target}: it failed its health check before; "
+                          "use Update now to retry", logging.WARNING, name, "update")
+                self._set(name, job="rolled-back")
+                return
             self._set(name, job="updating", message="Recreating")
-            self._recreate(ctr, cleanup=True)
+            try:
+                self._recreate(ctr, cleanup=True)
+            except UnhealthyError:
+                if avail:
+                    self._set(name, failed_image=target)
+                raise
             self._set(name, job="updated", update_available=False, last_update=time.time(),
-                      message="")
+                      message="", failed_image=None)
             self._log("updated" if avail else "recreated", container=name,
                       event="update" if avail else "recreate")
         self._locked(name, job)
@@ -284,9 +307,9 @@ class Updater:
             if was_running:
                 self.d.start(new_id)
                 self._log("started", logging.DEBUG, name, "recreate")
-        except Exception:
-            self._log("recreate failed, rolling back to previous container", logging.ERROR,
-                      name, "rollback")
+                self._verify(new_id, name)
+        except Exception as e:
+            self._log(f"{e}; rolling back to previous container", logging.ERROR, name, "rollback")
             if new_id:
                 self.d.remove(new_id)
             self.d.rename(old_id, name)
@@ -301,6 +324,40 @@ class Updater:
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
             self.remove_old_image(old_img, ref)
         return new_id
+
+    def _verify(self, cid, name):
+        """Wait for the new container to prove itself; raise UnhealthyError to roll back.
+
+        With a healthcheck: wait up to health_timeout for `healthy`. Without one: it must
+        still be running (not crash-looping) after startup_grace seconds."""
+        info = self.d.inspect(cid)
+        test = (info["Config"].get("Healthcheck") or {}).get("Test") or []
+        has_hc = bool(test) and test[0] != "NONE"
+        limit = self.health_timeout if has_hc else self.startup_grace
+        deadline = self.clock() + limit
+        self._log("waiting for healthcheck" if has_hc else f"checking it stays up for {limit}s",
+                  logging.DEBUG, name, "health")
+        restarts = info.get("RestartCount", 0)
+        while True:
+            st = info["State"]
+            if not st.get("Running") or st.get("Restarting"):
+                raise UnhealthyError(f"new container exited (code {st.get('ExitCode')})")
+            if info.get("RestartCount", 0) > restarts:
+                raise UnhealthyError(f"new container crashed and was restarted "
+                                     f"(exit code {st.get('ExitCode')})")
+            health = st.get("Health") or {}
+            if has_hc and health.get("Status") == "healthy":
+                self._log("new container is healthy", container=name, event="health")
+                return
+            if has_hc and health.get("Status") == "unhealthy":
+                out = ((health.get("Log") or [{}])[-1].get("Output") or "").strip()[:300]
+                raise UnhealthyError("new container is unhealthy" + (f": {out}" if out else ""))
+            if self.clock() >= deadline:
+                if has_hc:
+                    raise UnhealthyError(f"new container not healthy after {limit}s")
+                return
+            self.sleep(min(2, max(0.1, deadline - self.clock())))
+            info = self.d.inspect(cid)
 
     def _restart_dependents(self, deps, dep_running):
         for d in deps:
@@ -359,5 +416,8 @@ class Updater:
         for c in self.d.containers():
             if self.eligible(c):
                 name = c["Names"][0].lstrip("/")
-                (self.update if update else self.check_only)(name)
+                if update:
+                    self.update(name, scheduled=True)
+                else:
+                    self.check_only(name)
         self._log(f"run finished in {time.monotonic() - t0:.1f}s", event="run")

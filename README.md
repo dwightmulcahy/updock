@@ -41,7 +41,9 @@ Content-Security-Policy, `X-Frame-Options: DENY` and `nosniff`.
 
 1. Pulls each container's image tag (`nginx:latest`, etc.).
 2. If the pulled image ID differs from the running one, it stops the container, renames it, creates a replacement with the same config (env, ports, volumes incl. anonymous ones, networks + aliases, labels, restart policy), and starts it.
-3. On failure it rolls back to the old container. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image (see below).
+3. It then verifies the new container: if the image has a healthcheck it must become `healthy` within `UPDOCK_HEALTH_TIMEOUT`; otherwise it must stay running (no exit, no restart loop) for `UPDOCK_STARTUP_GRACE` seconds. The old container is kept (stopped, renamed) until then.
+4. On any failure it rolls back to the old container and marks the row **rolled-back** with the reason. Scheduled runs won't retry the same broken image; **Update now** still can.
+5. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image (see below).
 
 Containers that share the updated container's network (`network_mode: container:<name>`, or Compose `network_mode: service:<name>`, e.g. apps behind a VPN container) are stopped first and recreated afterwards to join the new container's network. If the update rolls back, they are simply restarted.
 
@@ -93,6 +95,8 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
+| `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
