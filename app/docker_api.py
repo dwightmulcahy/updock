@@ -116,6 +116,11 @@ class Docker:
     def remove(self, cid):
         self._req("DELETE", f"/containers/{cid}", params={"force": 1})
 
+    def restart(self, cid, t=10):
+        r = self.c.post(f"/containers/{cid}/restart", params={"t": t})
+        if r.status_code != 204:
+            raise DockerError(r.status_code, r.text)
+
     def remove_image(self, ref):
         """Delete an image by ID, or untag it when given a tag."""
         self._req("DELETE", f"/images/{quote(ref, safe='')}")

@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from app.updater import Updater, base_repo, build_create_body, image_info
+from app.updater import Updater, base_repo, build_create_body, compose_depends, compose_order, image_info
 from conftest import CID, IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 
@@ -922,3 +922,109 @@ def test_state_persisted_and_restored(fake, tmp_path):
     st = u2.state["web"]
     assert st["job"] == "update-available" and st["latest"]["id"] == "new" and st["last_check"]
     assert u2.list()[0]["update_available"] is True
+
+
+
+# ---------- Compose awareness ----------
+
+P, S, D = "com.docker.compose.project", "com.docker.compose.service", "com.docker.compose.depends_on"
+
+
+def compose_ctr(fake, name, service, depends="", project="proj", **labels):
+    c = make_ctr(name, cid=name[0] * 63 + "x")
+    c["Config"]["Labels"] = {P: project, S: service, **({D: depends} if depends else {}), **labels}
+    return fake.add(c)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", {}),
+    ("db:service_started:false", {"db": False}),
+    ("db:service_healthy:true,cache:service_started", {"db": True, "cache": False}),
+    ("db:service_started:TRUE, ,redis:x:false", {"db": True, "redis": False}),
+])
+def test_compose_depends(value, expected):
+    assert compose_depends({D: value} if value else {}) == expected
+    assert compose_depends(None) == {}
+
+
+def entry(name, service=None, depends="", project="proj"):
+    labels = {P: project, S: service, D: depends} if service else {}
+    return {"Id": name, "Labels": labels}
+
+
+def test_compose_order_dependencies_first():
+    cs = [entry("web", "web", "api:service_started"), entry("api", "api", "db:service_healthy:true"),
+          entry("db", "db"), entry("plain"), entry("other-db", "db", project="other")]
+    assert [c["Id"] for c in compose_order(cs)] == ["db", "api", "web", "plain", "other-db"]
+
+
+def test_compose_order_cycles_and_unknown_services():
+    cs = [entry("a", "a", "b:x"), entry("b", "b", "a:x"), entry("c", "c", "missing:x")]
+    assert sorted(c["Id"] for c in compose_order(cs)) == ["a", "b", "c"]
+    assert len(compose_order(cs)) == 3
+
+
+def test_run_all_updates_in_dependency_order(fake, monkeypatch):
+    u = Updater(fake)
+    compose_ctr(fake, "web", "web", "db:service_started")
+    compose_ctr(fake, "db", "db")
+    seen = []
+    monkeypatch.setattr(u, "update", lambda n, scheduled=False: seen.append(n))
+    u.run_all()
+    assert seen == ["db", "web"]
+
+
+def test_compose_image_label_refreshed(up, fake):
+    compose_ctr(fake, "web", "web", **{"com.docker.compose.image": OLD_IMG})
+    publish_new(fake)
+    up.update("web")
+    assert fake.created_body["Labels"]["com.docker.compose.image"] == NEW_IMG
+
+
+def test_compose_image_label_refresh_failure_is_harmless(up, fake, monkeypatch):
+    compose_ctr(fake, "web", "web", **{"com.docker.compose.image": OLD_IMG})
+    real = fake.image
+
+    def image(ref):  # by-tag lookup during recreate is only the label refresh
+        if ref == "test/app:latest" and up.state["web"].get("job") == "updating":
+            raise RuntimeError("gone")
+        return real(ref)
+    monkeypatch.setattr(fake, "image", image)
+    up.update("web", force=True)
+    assert up.state["web"]["job"] == "updated"
+    assert fake.created_body["Labels"]["com.docker.compose.image"] == OLD_IMG
+    assert any("could not refresh" in e["msg"] for e in up.logs)
+
+
+def test_depends_on_restart_true_restarts_dependents(up, fake):
+    compose_ctr(fake, "db", "db")
+    compose_ctr(fake, "api", "api", "db:service_healthy:true")
+    compose_ctr(fake, "web", "web", "db:service_started:false")
+    compose_ctr(fake, "elsewhere", "api", "db:service_started:true", project="other")
+    publish_new(fake)
+    up.update("db")
+    assert fake.restarted == [fake.ctrs["api"]["Id"]]
+    assert any(e["container"] == "api" and e["event"] == "compose" for e in up.logs)
+
+
+def test_depends_on_restart_failure_logged(up, fake):
+    compose_ctr(fake, "db", "db")
+    compose_ctr(fake, "api", "api", "db:service_healthy:true")
+    fake.fail["restart"] = RuntimeError("nope")
+    up.update("db", force=True)
+    assert up.state["db"]["job"] == "updated"
+    assert any(e["level"] == "ERROR" and "failed: nope" in e["msg"] for e in up.logs)
+
+
+def test_deploy_also_restarts_compose_dependents(up, fake):
+    compose_ctr(fake, "db", "db")
+    compose_ctr(fake, "api", "api", "db:service_healthy:true")
+    fake.tags["test/app:1.0"] = OLD_IMG
+    up.deploy("db", "1.0")
+    assert fake.restarted == [fake.ctrs["api"]["Id"]]
+
+
+def test_non_compose_container_restarts_nothing(up, fake):
+    fake.add(make_ctr())
+    up.update("web", force=True)
+    assert not hasattr(fake, "restarted")
