@@ -296,7 +296,21 @@ fetch("/api/notify").then(r => r.json()).then(n => {
   b.title = n.enabled ? `Email ${n.events.join(", ")} to ${n.to.join(", ")} via ${n.server}` : "";
 }).catch(() => {});
 
-refresh(); setInterval(refresh, 3000);
+// Live updates over Server-Sent Events; fall back to polling when unavailable.
+let live = false, tRows, tLogs;
+const soon = (fn, t, ms) => { clearTimeout(t); return setTimeout(fn, ms); };
+function connectEvents() {
+  if (!window.EventSource) return;
+  const es = new EventSource("/api/events");
+  es.onopen = () => { live = true; };
+  es.addEventListener("state", () => { tRows = soon(refresh, tRows, 250); });
+  es.addEventListener("log", () => { tLogs = soon(() => refreshLogs(), tLogs, 300); });
+  es.onerror = () => { live = false; };  // EventSource reconnects by itself
+}
+connectEvents();
+refresh();
+setInterval(() => { if (!live) refresh(); }, 3000);   // polling only while not live
+setInterval(() => { if (live) refresh(); }, 30000);   // slow safety refresh when live
 </script>
 </body>
 </html>

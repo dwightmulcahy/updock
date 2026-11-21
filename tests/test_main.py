@@ -407,3 +407,49 @@ def test_log_counts_listener():
     before = main.LOG_COUNTS.get("ERROR", 0)
     main.LOGBUF.emit(lg.LogRecord("x", lg.ERROR, "", 0, "boom", (), None))
     assert main.LOG_COUNTS["ERROR"] == before + 1
+
+
+
+# ---------- API token / events ----------
+
+def test_api_token(client, up, monkeypatch):
+    monkeypatch.setattr(main, "UI_PASS", "secret")
+    monkeypatch.setattr(main, "API_TOKEN", "tok-123")
+    up.list.return_value = []
+    up.counters = __import__("collections").Counter()
+    up.last_run, up._disk = {}, None
+    bearer = {"Authorization": "Bearer tok-123"}
+    assert client.post("/api/update-all", headers=bearer).status_code == 202
+    assert client.get("/metrics", headers=bearer).status_code == 200
+    r = client.post("/api/update-all", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401 and r.json()["detail"] == "invalid API token"
+    assert client.get("/", headers=bearer).status_code == 401  # token is API-only
+    monkeypatch.setattr(main, "API_TOKEN", "")
+    assert client.get("/api/containers", headers=bearer).status_code == 401
+
+
+def test_state_changes_published(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main.HUB, "publish", lambda kind, data: seen.append((kind, data)))
+    main.up.on_change("web", {"job": "pulling"})
+    assert seen == [("state", {"name": "web", "job": "pulling"})]
+
+
+def test_log_entries_published(monkeypatch):
+    import logging as lg
+    seen = []
+    monkeypatch.setattr(main.HUB, "publish", lambda kind, data: seen.append(kind))
+    main.LOGBUF.emit(lg.LogRecord("x", lg.INFO, "", 0, "hello", (), None))
+    assert "log" in seen
+
+
+def test_events_endpoint(client, monkeypatch):
+    async def fake_stream(hub, q, is_disconnected):
+        yield "retry: 3000\n\n"
+        yield "id: 1\nevent: log\ndata: {}\n\n"
+    monkeypatch.setattr(main.eventsmod, "stream", fake_stream)
+    with client.stream("GET", "/api/events") as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        assert r.headers["cache-control"] == "no-cache"
+        body = "".join(r.iter_text())
+    assert "event: log" in body

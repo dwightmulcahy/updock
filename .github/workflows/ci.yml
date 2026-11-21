@@ -66,7 +66,7 @@ jobs:
           docker run -d --name app -p ${PORT}:8080 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v updock-ci-data:/data \
-            -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret -e UPDOCK_LOG_LEVEL=DEBUG \
+            -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret -e UPDOCK_LOG_LEVEL=DEBUG -e UPDOCK_API_TOKEN=ci-token \
             --read-only --tmpfs /tmp \
             --cap-drop ALL --security-opt no-new-privileges:true \
             --pids-limit 200 --memory 256m \
@@ -145,6 +145,18 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' "$base/metrics")" = 401
           curl -fsS -u admin:ci-secret "$base/metrics" | tee metrics.txt | grep -E '^updock_(runs_total|results_total|containers_monitored)'
           grep -q 'updock_container_status{container="smoke-target"' metrics.txt
+      - name: API token and live events
+        run: |
+          set -euo pipefail
+          base="http://localhost:${PORT}"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' "$base/api/containers")" = 401
+          curl -fsS -H 'Authorization: Bearer ci-token' "$base/metrics" >/dev/null
+          (timeout 10 curl -sN -H 'Authorization: Bearer ci-token' "$base/api/events" > events.txt || true) &
+          sleep 2
+          curl -fsS -H 'Authorization: Bearer ci-token' -X POST "$base/api/containers/smoke-target/check"
+          wait
+          head -20 events.txt
+          grep -q '^event: state' events.txt && grep -q '^event: log' events.txt
       - name: Scan image for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

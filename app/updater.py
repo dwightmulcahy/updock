@@ -188,6 +188,7 @@ class Updater:
         self.hooks = hooks
         self.disk_max, self.disk_warn = disk_max, disk_warn
         self._disk, self._disk_alerted = None, "ok"
+        self.on_change = None  # callback(name, state) for live UI updates
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
         self.last_run = {}
         self._bad_labels = set()
@@ -205,6 +206,11 @@ class Updater:
 
     def _set(self, name, **kw):
         self.state[name].update(kw)
+        if self.on_change:
+            try:
+                self.on_change(name, dict(self.state[name]))
+            except Exception:  # live updates must never break a job
+                pass
         if self.store:
             self.store.save_state({n: dict(st) for n, st in self.state.items()})
 

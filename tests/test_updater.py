@@ -1476,3 +1476,15 @@ def test_run_counters_and_failure(fake, monkeypatch):
     with pytest.raises(RuntimeError):
         u.run_all()
     assert u.counters["runs"] == 2 and u.counters["run_failures"] == 1
+
+
+
+def test_on_change_callback_and_errors(up, fake):
+    seen = []
+    up.on_change = lambda n, st: seen.append((n, st.get("job")))
+    fake.add(make_ctr())
+    up.check("web")
+    assert ("web", "up-to-date") in seen
+    up.on_change = lambda n, st: 1 / 0
+    up.check("web")  # a broken listener doesn't break the job
+    assert up.state["web"]["job"] == "up-to-date"
