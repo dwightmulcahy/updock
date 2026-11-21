@@ -370,3 +370,40 @@ def test_disk_endpoint(client, up):
     up.disk_status.side_effect = RuntimeError("no df")
     r = client.get("/api/disk")
     assert r.status_code == 502 and "no df" in r.json()["detail"]
+
+
+
+# ---------- probes / metrics ----------
+
+def test_probes_public_and_readiness(client, up, monkeypatch):
+    monkeypatch.setattr(main, "UI_PASS", "secret")
+    assert client.get("/livez").json() == {"status": "ok"}
+    up.d.ping.return_value = True
+    assert client.get("/readyz").json() == {"status": "ok", "docker": True}
+    up.d.ping.return_value = False
+    assert client.get("/readyz").status_code == 503
+    up.d.ping.side_effect = OSError("no socket")
+    assert client.get("/readyz").json()["docker"] is False
+    assert client.get("/startupz").json() == {"status": "ok"}  # lifespan ran
+    monkeypatch.setitem(main.STARTED, "done", False)
+    assert client.get("/startupz").status_code == 503
+
+
+def test_metrics_endpoint_auth(client, up, monkeypatch):
+    up.list.return_value = []
+    up.counters = __import__("collections").Counter()
+    up.last_run, up._disk = {}, None
+    monkeypatch.setattr(main, "UI_PASS", "secret")
+    assert client.get("/metrics").status_code == 401
+    r = client.get("/metrics", headers=_auth("admin", "secret"))
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain; version=0.0.4")
+    assert "updock_runs_total 0" in r.text
+    monkeypatch.setattr(main, "METRICS_PUBLIC", True)
+    assert client.get("/metrics").status_code == 200
+
+
+def test_log_counts_listener():
+    import logging as lg
+    before = main.LOG_COUNTS.get("ERROR", 0)
+    main.LOGBUF.emit(lg.LogRecord("x", lg.ERROR, "", 0, "boom", (), None))
+    assert main.LOG_COUNTS["ERROR"] == before + 1

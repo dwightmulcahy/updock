@@ -1448,3 +1448,31 @@ def test_disk_status_cache(gup, fake):
     assert u.disk_status(max_age=60) is first
     assert u.disk_status()["used"] == 1
     assert first["max"] == 50_000 and first["warn"] is None
+
+
+# ---------- counters for metrics ----------
+
+def test_outcome_counters(fake, monkeypatch):
+    u = Updater(fake)
+    fake.add(make_ctr())
+    fake.add(make_ctr("db", cid="d" * 64, image="other/db:1"))
+    u.update("db", force=True)  # recreate, no new image
+    publish_new(fake)
+    u.update("web")
+    fake.fail["pull"] = RuntimeError("x")
+    u.check_only("web")
+    u.update("web")
+    c = u.counters
+    assert (c["result_updated"], c["result_recreated"], c["result_check_failed"],
+            c["result_failed"]) == (1, 1, 1, 1)
+
+
+def test_run_counters_and_failure(fake, monkeypatch):
+    u = Updater(fake)
+    fake.add(make_ctr())
+    u.run_all()
+    assert u.counters["runs"] == 1 and u.last_run["duration"] >= 0
+    monkeypatch.setattr(fake, "containers", lambda all=False: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError):
+        u.run_all()
+    assert u.counters["runs"] == 2 and u.counters["run_failures"] == 1

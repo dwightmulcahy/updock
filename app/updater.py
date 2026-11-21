@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
@@ -188,6 +188,8 @@ class Updater:
         self.hooks = hooks
         self.disk_max, self.disk_warn = disk_max, disk_warn
         self._disk, self._disk_alerted = None, "ok"
+        self.counters = Counter()  # Prometheus counters: outcomes and runs since start
+        self.last_run = {}
         self._bad_labels = set()
         if store:
             for name, st in store.load_state().items():
@@ -313,13 +315,16 @@ class Updater:
         try:
             fn()
         except HookSkip as e:
+            self.counters["result_skipped"] += 1
             self._set(name, job="skipped", message=str(e))
             self._log(str(e), container=name, event="hook")
         except UnhealthyError as e:
+            self.counters["result_rolled_back"] += 1
             self._set(name, job="rolled-back", message=str(e))
             self._log(f"rolled back: {e}", logging.ERROR, name, "rollback")
             self.notifier.notify("rollback", name, f"update rolled back: {e}")
         except Exception as e:
+            self.counters["result_failed" if notify_errors else "result_check_failed"] += 1
             self._set(name, job="error", message=str(e))
             if notify_errors:
                 self.notifier.notify("error", name, f"{type(e).__name__}: {e}")
@@ -342,6 +347,7 @@ class Updater:
             if avail and scheduled:
                 blocked = self._cooldown_block(name, ctr)
                 if blocked:  # before pulling: a too-new image is never even downloaded
+                    self.counters["result_cooldown"] += 1
                     self._set(name, job="cooldown", message=blocked)
                     self._log(blocked, container=name, event="cooldown")
                     return
@@ -366,6 +372,7 @@ class Updater:
                 if avail:
                     self._set(name, failed_image=target)
                 raise
+            self.counters["result_updated" if avail else "result_recreated"] += 1
             self._set(name, job="updated", update_available=False, last_update=time.time(),
                       message="", failed_image=None)
             self._log("updated" if avail else "recreated", container=name,
@@ -758,18 +765,25 @@ class Updater:
 
     def run_all(self, update=True):
         t0 = time.monotonic()
+        self.counters["runs"] += 1
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
-        with self.notifier.batch():
-            if update and not self._disk_gate():
-                update = False
-            for c in compose_order(self.d.containers(all=self.include_stopped)):
-                if self.eligible(c):
-                    name = c["Names"][0].lstrip("/")
-                    if update and self.state.get(name, {}).get("pinned"):
-                        self._log("pinned: checking only", logging.DEBUG, name, "pin")
-                        self.check_only(name, scheduled=True)
-                    elif update:
-                        self.update(name, scheduled=True)
-                    else:
-                        self.check_only(name, scheduled=True)
-        self._log(f"run finished in {time.monotonic() - t0:.1f}s", event="run")
+        try:
+            with self.notifier.batch():
+                if update and not self._disk_gate():
+                    update = False
+                for c in compose_order(self.d.containers(all=self.include_stopped)):
+                    if self.eligible(c):
+                        name = c["Names"][0].lstrip("/")
+                        if update and self.state.get(name, {}).get("pinned"):
+                            self._log("pinned: checking only", logging.DEBUG, name, "pin")
+                            self.check_only(name, scheduled=True)
+                        elif update:
+                            self.update(name, scheduled=True)
+                        else:
+                            self.check_only(name, scheduled=True)
+        except Exception:
+            self.counters["run_failures"] += 1
+            raise
+        finally:
+            self.last_run = {"t": time.time(), "duration": time.monotonic() - t0}
+        self._log(f"run finished in {self.last_run['duration']:.1f}s", event="run")

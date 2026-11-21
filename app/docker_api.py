@@ -116,6 +116,10 @@ class Docker:
             return r.json()
         return None
 
+    def ping(self):
+        r = self.c.get("/_ping", timeout=5)
+        return r.status_code == 200
+
     def containers(self, all=False):
         return self._req("GET", "/containers/json", params={"all": int(all)})
 

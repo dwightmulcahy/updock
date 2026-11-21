@@ -90,6 +90,19 @@ For every container the UI shows the **running** image and, after a check, the *
 
 After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.
 
+## Monitoring
+
+`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
+
+Probes without auth: `/livez` (process up), `/readyz` (Docker reachable, else 503; used by the image's `HEALTHCHECK`), `/startupz` (scheduler started), plus `/health` (version).
+
+```yaml
+scrape_configs:
+  - job_name: updock
+    static_configs: [{ targets: ["updock:8080"] }]
+    basic_auth: { username: admin, password_file: /etc/prometheus/updock_password }
+```
+
 ## Email notifications
 
 Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks, failed updates and (in check-only mode) newly available images. Everything that happens during one scheduled run arrives as a single email; manual actions email immediately. "Update available" is sent once per new image, not every run. Use **Test email** in the header to check the settings; every send (or failure) is in the logs as a `notify` event.
@@ -120,7 +133,8 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 
 | Action | Endpoint |
 |---|---|
-| Health (no auth) | `GET /health` |
+| Health / probes (no auth) | `GET /health`, `/livez`, `/readyz`, `/startupz` |
+| Prometheus metrics | `GET /metrics` |
 | List | `GET /api/containers` |
 | Check (pull only) | `POST /api/containers/{name}/check` |
 | Update now | `POST /api/containers/{name}/update` |
@@ -163,6 +177,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
+| `UPDOCK_METRICS_PUBLIC` | `false` | Serve `/metrics` without login |
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
 | `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |
