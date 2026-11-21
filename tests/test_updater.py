@@ -713,3 +713,90 @@ def test_deploy_rolls_back_when_unhealthy(hup, fake, monkeypatch):
     script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 2}])
     hup.deploy("web", "1.0")
     assert hup.state["web"]["job"] == "rolled-back" and fake.ctrs["web"]["Id"] == CID
+
+
+# ---------- registry digest check (no pull) ----------
+
+class DigestRegistry:
+    def __init__(self, digest="sha256:remote", info=None, fail=None, info_fail=None):
+        self._digest, self._info, self.fail, self.info_fail = digest, info, fail, info_fail
+        self.platforms = []
+
+    def digest(self, ref):
+        if self.fail:
+            raise self.fail
+        return self._digest
+
+    def remote_info(self, ref, platform):
+        self.platforms.append(platform)
+        if self.info_fail:
+            raise self.info_fail
+        return self._info or {"id": "new", "digest": self._digest, "tags": [],
+                              "version": "2.0", "revision": None, "created": None}
+
+
+@pytest.fixture
+def dup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"], Os="linux",
+                                Architecture="arm64", Variant="v8")
+    return lambda reg, **kw: Updater(fake, registry=reg, **kw)
+
+
+def test_digest_match_skips_pull(dup, fake):
+    u = dup(DigestRegistry(digest="sha256:local"))
+    fake.add(make_ctr())
+    assert u.check("web")[1] is False
+    assert "pull" not in fake.calls
+    assert u.state["web"]["job"] == "up-to-date" and u.state["web"]["latest"]["id"] == "old"
+
+
+def test_digest_differs_reports_remote_details_without_pull(dup, fake):
+    reg = DigestRegistry()
+    u = dup(reg)
+    fake.add(make_ctr())
+    u.check_only("web")
+    st = u.state["web"]
+    assert st["job"] == "update-available" and st["latest"]["version"] == "2.0"
+    assert "pull" not in fake.calls
+    assert reg.platforms == [{"os": "linux", "architecture": "arm64", "variant": "v8"}]
+
+
+def test_update_pulls_only_after_digest_says_new(dup, fake):
+    u = dup(DigestRegistry())
+    fake.add(make_ctr())
+    publish_new(fake)
+    u.update("web")
+    assert fake.calls.count("pull") == 1
+    assert u.state["web"]["job"] == "updated" and fake.ctrs["web"]["Image"] == NEW_IMG
+
+
+def test_update_digest_differs_but_pulled_image_same(dup, fake):
+    # e.g. locally built image without RepoDigests: digest "differs", pull shows no change
+    u = dup(DigestRegistry())
+    fake.add(make_ctr())
+    u.update("web")
+    assert "create" not in fake.calls and u.logs[-1]["msg"] == "up to date"
+
+
+def test_remote_info_failure_keeps_digest(dup, fake):
+    u = dup(DigestRegistry(info_fail=RuntimeError("blob 500")))
+    fake.add(make_ctr())
+    u.check("web")
+    assert u.state["web"]["latest"] == {"id": None, "digest": "sha256:remote", "tags": [],
+                                        "version": None, "revision": None, "created": None}
+
+
+def test_registry_failure_falls_back_to_pull(dup, fake):
+    u = dup(DigestRegistry(fail=RuntimeError("401")))
+    fake.add(make_ctr())
+    publish_new(fake)
+    assert u.check("web")[1] is True and "pull" in fake.calls
+    assert any("pulling instead" in e["msg"] for e in u.logs)
+
+
+def test_digest_check_disabled(dup, fake):
+    u = dup(DigestRegistry(digest="sha256:local"), digest_check=False)
+    fake.add(make_ctr())
+    u.check("web")
+    assert "pull" in fake.calls

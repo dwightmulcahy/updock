@@ -65,7 +65,7 @@ jobs:
         run: |
           docker run -d --name app -p ${PORT}:8080 \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret \
+            -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret -e UPDOCK_LOG_LEVEL=DEBUG \
             --read-only --tmpfs /tmp \
             --cap-drop ALL --security-opt no-new-privileges:true \
             --pids-limit 200 --memory 256m \
@@ -98,6 +98,26 @@ jobs:
             sleep 1
           done
           curl -s -u admin:ci-secret "$base/api/logs"; echo "::error::smoke-target was not recreated"; exit 1
+      - name: Registry digest check (no pull)
+        run: |
+          set -euo pipefail
+          base="http://localhost:${PORT}"
+          curl -fsS -u admin:ci-secret -X POST "$base/api/containers/smoke-target/check"
+          ok=0
+          for i in $(seq 1 30); do
+            curl -fsS -u admin:ci-secret "$base/api/containers" > c.json
+            python3 - <<'PY' && { ok=1; break; }
+          import json, sys
+          c = next(x for x in json.load(open("c.json"))["containers"] if x["name"] == "smoke-target")
+          print(c.get("job"), c.get("latest"))
+          sys.exit(0 if c.get("job") == "up-to-date" and (c.get("latest") or {}).get("digest") else 1)
+          PY
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { echo "::error::digest check did not report up-to-date"; exit 1; }
+          # proves the HEAD-digest path ran (not the pull fallback)
+          curl -fsS -u admin:ci-secret "$base/api/logs?container=smoke-target&level=DEBUG&q=registry%20digest" \
+            | python3 -c "import json,sys; e=json.load(sys.stdin)['entries']; print(e[-1]['msg'] if e else e); sys.exit(0 if e and e[-1]['msg'].endswith('matches') else 1)"
       - name: Scan image for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
