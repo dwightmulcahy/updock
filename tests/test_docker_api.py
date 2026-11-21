@@ -283,3 +283,70 @@ def test_cred_helper_missing(tmp_path, monkeypatch, caplog):
     (tmp_path / "config.json").write_text(json.dumps({"credsStore": "nothere"}))
     assert docker_api.registry_credentials("nginx") is None
     assert "not found on PATH" in caplog.records[-1].getMessage()
+
+
+# ---------- exec / demux ----------
+
+from app.docker_api import demux  # noqa: E402
+
+
+def frame(stream, data):
+    return bytes([stream, 0, 0, 0]) + len(data).to_bytes(4, "big") + data
+
+
+def test_demux_frames_and_raw():
+    assert demux(frame(1, b"out\n") + frame(2, b"err\n")) == "out\nerr\n"
+    assert demux(b"plain tty output") == "plain tty output"
+    assert demux(frame(1, b"ok") + b"\x01\x00") == "ok\x01\x00"  # truncated tail kept
+    assert demux(b"") == ""
+
+
+def _exec_handler(start_resp, code=0):
+    def h(r):
+        if r.url.path.endswith("/exec"):
+            assert json.loads(r.content)["Cmd"] == ["sh", "-c", "true"]
+            return httpx.Response(201, json={"Id": "e1"})
+        if r.url.path == "/exec/e1/start":
+            return start_resp(r)
+        if r.url.path == "/exec/e1/json":
+            return httpx.Response(200, json={"ExitCode": code})
+        return httpx.Response(404)
+    return h
+
+
+def test_exec_run(mock_docker):
+    d, s = mock_docker
+    s["handler"] = _exec_handler(lambda r: httpx.Response(200, content=frame(1, b"hi\n")), 3)
+    assert d.exec_run("c1", ["sh", "-c", "true"]) == (3, "hi\n")
+
+
+def test_exec_run_truncates_output(mock_docker):
+    d, s = mock_docker
+    s["handler"] = _exec_handler(lambda r: httpx.Response(200, content=iter([b"x" * 12, b"y" * 5])))
+    assert d.exec_run("c1", ["sh", "-c", "true"], max_output=10) == (0, "x" * 10)
+
+
+def test_exec_run_start_error(mock_docker):
+    d, s = mock_docker
+    s["handler"] = _exec_handler(lambda r: httpx.Response(409, text="not running"))
+    with pytest.raises(DockerError, match="not running"):
+        d.exec_run("c1", ["sh", "-c", "true"])
+
+
+def test_exec_run_read_timeout(mock_docker):
+    d, s = mock_docker
+
+    def slow(r):
+        raise httpx.ReadTimeout("slow", request=r)
+    s["handler"] = _exec_handler(slow)
+    with pytest.raises(TimeoutError, match="after 5s"):
+        d.exec_run("c1", ["sh", "-c", "true"], timeout=5)
+
+
+def test_exec_run_total_timeout(mock_docker, monkeypatch):
+    d, s = mock_docker
+    s["handler"] = _exec_handler(lambda r: httpx.Response(200, content=b"tick"))
+    ticks = iter([0.0, 100.0])
+    monkeypatch.setattr(docker_api.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(TimeoutError, match="after 2s"):
+        d.exec_run("c1", ["sh", "-c", "true"], timeout=2)

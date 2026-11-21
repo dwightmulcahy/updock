@@ -1223,3 +1223,150 @@ def test_cooldown_label_uses_id_when_no_version(fake, monkeypatch):
                  "created": _iso(10)}
     u.update("web", scheduled=True)
     assert u.state["web"]["message"].startswith("cooldown: new image is ")
+
+
+# ---------- lifecycle hooks ----------
+
+@pytest.fixture
+def kup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.execs = []
+    fake.exec_codes = {}
+
+    def exec_run(cid, argv, timeout=60):
+        fake.execs.append((cid, argv, timeout))
+        key = argv[-1] if argv[:2] == ["sh", "-c"] else argv[0]
+        res = fake.exec_codes.get(key, 0)
+        if isinstance(res, Exception):
+            raise res
+        return res, f"output of {key}\n"
+    fake.exec_run = exec_run
+    return Updater(fake, hooks=True)
+
+
+def hooked(fake, **hooks):
+    c = make_ctr()
+    c["Config"]["Labels"].update({f"updock.hook.{k.replace('_', '-')}": v for k, v in hooks.items()})
+    return fake.add(c)
+
+
+def test_hooks_off_by_default(fake):
+    hooked(fake, pre_update="backup")
+    fake.exec_run = lambda *a, **k: pytest.fail("hook ran")
+    Updater(fake).update("web", force=True)
+
+
+def test_all_hooks_run_in_order(kup, fake):
+    hooked(fake, pre_check="pc", pre_update="pu", post_update="po", post_check="pk")
+    publish_new(fake)
+    kup.update("web")
+    cmds = [argv[-1] for _, argv, _ in fake.execs]
+    assert cmds == ["pc", "pu", "po", "pk"]
+    assert fake.execs[0][0] == CID and fake.execs[2][0] != CID  # post-update on the new one
+    assert kup.state["web"]["job"] == "updated"
+    msgs = [e["msg"] for e in kup.logs if e["event"] == "hook"]
+    assert "pre-update hook exited 0: output of pu" in msgs
+
+
+def test_pre_update_exit_75_skips(kup, fake):
+    hooked(fake, pre_update="busy")
+    fake.exec_codes["busy"] = 75
+    publish_new(fake)
+    kup.update("web")
+    assert kup.state["web"]["job"] == "skipped" and "exit 75" in kup.state["web"]["message"]
+    assert "stop" not in fake.calls and fake.ctrs["web"]["Id"] == CID
+
+
+def test_pre_update_failure_aborts(kup, fake):
+    hooked(fake, pre_update="backup")
+    fake.exec_codes["backup"] = 2
+    kup.update("web", force=True)
+    assert kup.state["web"]["job"] == "error"
+    assert "pre-update hook exited 2; update aborted" in kup.state["web"]["message"]
+    assert "stop" not in fake.calls
+
+
+def test_pre_update_exception_aborts(kup, fake):
+    hooked(fake, pre_update="backup")
+    fake.exec_codes["backup"] = RuntimeError("exec failed")
+    kup.update("web", force=True)
+    assert "exited -1" in kup.state["web"]["message"]
+    assert any(e["msg"] == "pre-update hook failed: exec failed" for e in kup.logs)
+
+
+def test_other_hook_failures_only_logged(kup, fake):
+    hooked(fake, pre_check="pc", post_update="po", post_check="pk")
+    fake.exec_codes.update(pc=1, po=1, pk=TimeoutError("still running after 60s"))
+    kup.update("web", force=True)
+    assert kup.state["web"]["job"] == "updated"
+    lv = {e["msg"].split(" hook")[0]: e["level"] for e in kup.logs
+          if e["event"] == "hook" and e["level"] != "DEBUG"}
+    assert lv == {"pre-check": "WARNING", "post-update": "WARNING", "post-check": "ERROR"}
+
+
+def test_check_hooks_on_check_only_and_after_errors(kup, fake):
+    hooked(fake, pre_check="pc", post_check="pk")
+    fake.fail["pull"] = RuntimeError("down")
+    kup.check_only("web")
+    assert [argv[-1] for _, argv, _ in fake.execs] == ["pc", "pk"]
+    assert kup.state["web"]["job"] == "error"
+
+
+def test_post_check_inspect_failure_is_ignored(kup, fake, monkeypatch):
+    hooked(fake, post_check="pk")
+    real = fake.inspect
+    calls = {"n": 0}
+
+    def inspect(cid):
+        calls["n"] += 1
+        if calls["n"] > 2:  # wrapper's first inspect + check's inspect succeed
+            raise RuntimeError("gone")
+        return real(cid)
+    monkeypatch.setattr(fake, "inspect", inspect)
+    kup.check_only("web")
+    assert any("post-check hook skipped: gone" in e["msg"] for e in kup.logs)
+
+
+def test_hooks_not_run_on_stopped_container(kup, fake):
+    c = hooked(fake, pre_update="pu", pre_check="pc")
+    c["State"] = {"Running": False}
+    kup.update("web", force=True)
+    assert fake.execs == [] and kup.state["web"]["job"] == "updated"
+
+
+def test_exec_form_and_timeouts(kup, fake):
+    hooked(fake, pre_update='["/bin/backup", "--fast"]', pre_update_timeout="5m",
+           post_update="po", post_update_timeout="soon")
+    kup.update("web", force=True)
+    assert fake.execs[0][1:] == (["/bin/backup", "--fast"], 300)
+    assert fake.execs[1][1:] == (["sh", "-c", "po"], 60)
+    assert any("invalid updock.hook.post-update-timeout" in e["msg"] for e in kup.logs)
+
+
+def test_invalid_json_falls_back_to_shell(kup, fake):
+    hooked(fake, pre_update="[not json")
+    kup.update("web", force=True)
+    assert fake.execs[0][1] == ["sh", "-c", "[not json"]
+    assert any("not a valid JSON array" in e["msg"] for e in kup.logs)
+
+
+def test_hook_output_empty(kup, fake):
+    hooked(fake, pre_update="quiet")
+    fake.exec_run = lambda cid, argv, timeout=60: (0, "  ")
+    kup.update("web", force=True)
+    assert any(e["msg"] == "pre-update hook exited 0" for e in kup.logs)
+
+
+def test_dependents_do_not_run_parent_hooks(kup, fake):
+    hooked(fake)
+    dep = add_dependent(fake)
+    dep["Config"]["Labels"]["updock.hook.pre-update"] = "dep-hook"
+    kup.update("web", force=True)
+    assert all(argv[-1] != "dep-hook" for _, argv, _ in fake.execs)
+
+
+def test_deploy_runs_update_hooks(kup, fake):
+    hooked(fake, pre_update="pu")
+    fake.tags["test/app:1.0"] = OLD_IMG
+    kup.deploy("web", "1.0")
+    assert [argv[-1] for _, argv, _ in fake.execs] == ["pu"]

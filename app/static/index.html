@@ -28,7 +28,7 @@
   .pulling,.updating,.checking { background:#14263f; color:var(--accent); }
   .error { background:#3d1a1a; color:var(--err); }
   .rolled-back { background:#3d2a14; color:var(--warn); }
-  .cooldown { background:#1f2d3d; color:#7fb8ff; }
+  .cooldown, .skipped { background:#1f2d3d; color:#7fb8ff; }
   .msg { color:var(--err); font-size:12px; max-width:320px; }
   .actions { display:flex; gap:6px; justify-content:flex-end; }
   .logpanel { margin-top:24px; background:var(--panel); border-radius:8px; }
@@ -183,7 +183,7 @@ async function refresh() {
         <td>${esc(c.status)}</td>
         <td><span class="badge ${esc(c.job)}">${esc((c.job || "unchecked").replaceAll("-", " "))}</span>
             ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
-            ${["error", "rolled-back", "cooldown"].includes(c.job) && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
+            ${["error", "rolled-back", "cooldown", "skipped"].includes(c.job) && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
         <td>${ago(c.last_check)}</td>
         <td><div class="actions">
           <button ${dis} onclick="post('/api/containers/${n}/check')">Check</button>

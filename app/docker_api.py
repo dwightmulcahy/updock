@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from urllib.parse import quote
 
 import httpx
@@ -84,6 +85,18 @@ def registry_auth(repo):
         return None
     payload = {"username": creds[0], "password": creds[1], "serveraddress": creds[2]}
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def demux(raw):
+    """Decode Docker's multiplexed stdout/stderr stream (8-byte frame headers)."""
+    out, i = [], 0
+    while i + 8 <= len(raw) and raw[i] in (0, 1, 2) and raw[i + 1:i + 4] == b"\0\0\0":
+        size = int.from_bytes(raw[i + 4:i + 8], "big")
+        out.append(raw[i + 8:i + 8 + size])
+        i += 8 + size
+    if i < len(raw):  # not multiplexed (TTY) or truncated: keep the rest as-is
+        out.append(raw[i:])
+    return b"".join(out).decode(errors="replace")
 
 
 class Docker:
@@ -167,6 +180,27 @@ class Docker:
 
     def remove(self, cid):
         self._req("DELETE", f"/containers/{cid}", params={"force": 1})
+
+    def exec_run(self, cid, cmd, timeout=60, max_output=65536):
+        """Run `cmd` in a running container; return (exit_code, combined output).
+        Raises TimeoutError if it runs longer than `timeout` seconds (0 = no limit)."""
+        eid = self._req("POST", f"/containers/{cid}/exec",
+                        json={"Cmd": cmd, "AttachStdout": True, "AttachStderr": True})["Id"]
+        raw, start = b"", time.monotonic()
+        try:
+            with self.c.stream("POST", f"/exec/{eid}/start", json={"Detach": False, "Tty": False},
+                               timeout=httpx.Timeout(10, read=timeout or None)) as r:
+                if r.status_code >= 400:
+                    raise DockerError(r.status_code, r.read().decode().strip())
+                for chunk in r.iter_bytes():
+                    if len(raw) < max_output:
+                        raw += chunk
+                    if timeout and time.monotonic() - start > timeout:
+                        raise TimeoutError(f"still running after {timeout}s")
+        except httpx.ReadTimeout:
+            raise TimeoutError(f"still running after {timeout}s") from None
+        code = self._req("GET", f"/exec/{eid}/json").get("ExitCode")
+        return code, demux(raw[:max_output])
 
     def restart(self, cid, t=10):
         r = self.c.post(f"/containers/{cid}/restart", params={"t": t})

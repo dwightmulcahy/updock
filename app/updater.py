@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -61,6 +62,18 @@ def compose_order(containers):
     for c in containers:
         visit(c)
     return out
+
+
+HOOK_PREFIX = "updock.hook."
+HOOK_SKIP = 75  # EX_TEMPFAIL from a pre-update hook: skip this update, try again next run
+
+
+class HookError(Exception):
+    """A pre-update hook failed: the update is aborted."""
+
+
+class HookSkip(Exception):
+    """A pre-update hook asked to skip this update (exit code 75)."""
 
 
 class UnhealthyError(Exception):
@@ -150,7 +163,7 @@ class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
                  digest_check=True, notifier=None, store=None, include_stopped=False,
-                 cooldown=0):
+                 cooldown=0, hooks=False):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -171,6 +184,7 @@ class Updater:
         self.store = store
         self.include_stopped = include_stopped
         self.cooldown = cooldown
+        self.hooks = hooks
         self._bad_labels = set()
         if store:
             for name, st in store.load_state().items():
@@ -295,6 +309,9 @@ class Updater:
             return
         try:
             fn()
+        except HookSkip as e:
+            self._set(name, job="skipped", message=str(e))
+            self._log(str(e), container=name, event="hook")
         except UnhealthyError as e:
             self._set(name, job="rolled-back", message=str(e))
             self._log(f"rolled back: {e}", logging.ERROR, name, "rollback")
@@ -352,7 +369,63 @@ class Updater:
                       event="update" if avail else "recreate")
             if avail:
                 self.notifier.notify("update", name, change)
-        self._locked(name, job)
+        self._locked(name, self._with_check_hooks(name, job))
+
+    def _with_check_hooks(self, name, job):
+        """Run pre-check / post-check hooks around a check or update job."""
+        def wrapped():
+            ctr = self.d.inspect(name) if self.hooks else None
+            if ctr:
+                self.run_hook(ctr, "pre-check")
+            try:
+                job()
+            finally:
+                if ctr:
+                    try:
+                        self.run_hook(self.d.inspect(name), "post-check")
+                    except Exception as e:
+                        self._log(f"post-check hook skipped: {e}", logging.DEBUG, name, "hook")
+        return wrapped
+
+    def run_hook(self, ctr, hook):
+        """Run a lifecycle hook from the container's labels. Returns its exit code, or None
+        if hooks are off, no hook is set, or the container isn't running."""
+        if not self.hooks:
+            return None
+        name = ctr["Name"].lstrip("/")
+        labels = ctr["Config"].get("Labels") or {}
+        cmd = labels.get(HOOK_PREFIX + hook)
+        if not cmd:
+            return None
+        if not ctr["State"].get("Running"):
+            self._log(f"{hook} hook not run: container is not running", logging.DEBUG, name,
+                      "hook")
+            return None
+        raw_t = labels.get(f"{HOOK_PREFIX}{hook}-timeout", "60")
+        try:
+            timeout = parse_duration(raw_t)
+        except ValueError:
+            self._log(f"invalid {HOOK_PREFIX}{hook}-timeout={raw_t!r}; using 60s",
+                      logging.WARNING, name, "hook")
+            timeout = 60
+        argv = ["sh", "-c", cmd]
+        if cmd.lstrip().startswith("["):  # exec form, for images without a shell
+            try:
+                argv = [str(x) for x in json.loads(cmd)]
+            except ValueError:
+                self._log(f"{hook} hook is not a valid JSON array; running it with sh",
+                          logging.WARNING, name, "hook")
+        self._log(f"running {hook} hook: {cmd}", logging.DEBUG, name, "hook")
+        try:
+            code, out = self.d.exec_run(ctr["Id"], argv, timeout)
+        except Exception as e:
+            self._log(f"{hook} hook failed: {e}", logging.ERROR, name, "hook")
+            return -1
+        out = out.strip()
+        tail = f": {out[-500:]}" if out else ""
+        level = logging.INFO if code == 0 else logging.WARNING
+        self._log(f"{hook} hook exited {code}{tail}", level, name, "hook")
+        return code
 
     def cooldown_for(self, name, ctr):
         """Seconds a new image must age before scheduled runs apply it (label overrides)."""
@@ -395,7 +468,7 @@ class Updater:
             if scheduled and avail and key != self.state[name].get("notified_available"):
                 self.notifier.notify("available", name, self._describe_change(ctr))
                 self._set(name, notified_available=key)
-        self._locked(name, job, notify_errors=False)
+        self._locked(name, self._with_check_hooks(name, job), notify_errors=False)
 
     def _describe_change(self, ctr):
         """'test/app:latest 1.0.0 (8b0806bb9026) -> 2.0.0 (4b92afd055fd)'"""
@@ -482,6 +555,13 @@ class Updater:
         was_running = ctr["State"]["Running"] if start is None else start
         timeout = ctr["Config"].get("StopTimeout") or 10
 
+        if not network_parent:
+            code = self.run_hook(ctr, "pre-update")
+            if code == HOOK_SKIP:
+                raise HookSkip("pre-update hook asked to skip this update (exit 75)")
+            if code not in (None, 0):
+                raise HookError(f"pre-update hook exited {code}; update aborted")
+
         deps = self.dependents(old_id, name)
         dep_running = {d["Id"]: d["State"]["Running"] for d in deps}
         for d in deps:
@@ -519,6 +599,8 @@ class Updater:
             self._log("previous container restored", logging.WARNING, name, "rollback")
             raise
         self.d.remove(old_id)
+        if not network_parent and was_running:
+            self.run_hook(self.d.inspect(new_id), "post-update")
         for d in deps:
             self._recreate_dependent(d, new_id, dep_running[d["Id"]], name)
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
