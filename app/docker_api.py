@@ -30,8 +30,8 @@ def registry_of(repo):
     return "https://index.docker.io/v1/"
 
 
-def registry_auth(repo):
-    """Build X-Registry-Auth from a mounted docker config.json, if any."""
+def registry_credentials(repo):
+    """(user, password, serveraddress) from a mounted docker config.json, or None."""
     path = os.path.join(os.getenv("DOCKER_CONFIG", "/config"), "config.json")
     try:
         with open(path) as f:
@@ -43,7 +43,15 @@ def registry_auth(repo):
     if not entry or "auth" not in entry:
         return None
     user, _, pw = base64.b64decode(entry["auth"]).decode().partition(":")
-    payload = {"username": user, "password": pw, "serveraddress": reg}
+    return user, pw, reg
+
+
+def registry_auth(repo):
+    """Build X-Registry-Auth header value for the Engine API."""
+    creds = registry_credentials(repo)
+    if not creds:
+        return None
+    payload = {"username": creds[0], "password": creds[1], "serveraddress": creds[2]}
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -64,8 +72,8 @@ class Docker:
             return r.json()
         return None
 
-    def containers(self):
-        return self._req("GET", "/containers/json")
+    def containers(self, all=False):
+        return self._req("GET", "/containers/json", params={"all": int(all)})
 
     def inspect(self, cid):
         return self._req("GET", f"/containers/{quote(cid)}/json")
@@ -108,5 +116,6 @@ class Docker:
     def remove(self, cid):
         self._req("DELETE", f"/containers/{cid}", params={"force": 1})
 
-    def remove_image(self, iid):
-        self._req("DELETE", f"/images/{iid}")
+    def remove_image(self, ref):
+        """Delete an image by ID, or untag it when given a tag."""
+        self._req("DELETE", f"/images/{quote(ref, safe='')}")

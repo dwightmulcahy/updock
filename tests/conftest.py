@@ -71,7 +71,8 @@ class FakeDocker:
                 return n, c
         raise KeyError(cid)
 
-    def containers(self):
+    def containers(self, all=False):
+        self.calls.append(f"containers:{all}")
         return [{"Id": c["Id"], "Names": [f"/{n}"], "Image": c["Config"]["Image"],
                  "ImageID": c["Image"], "State": "running", "Status": "Up",
                  "Labels": c["Config"].get("Labels")} for n, c in self.ctrs.items()]
@@ -83,7 +84,7 @@ class FakeDocker:
     def image(self, ref):
         self._maybe_fail("image")
         iid = self.tags.get(ref, ref)
-        return self.images[iid]
+        return {**self.images[iid], "RepoTags": [t for t, i in self.tags.items() if i == iid]}
 
     def pull(self, ref):
         self._maybe_fail("pull")
@@ -121,9 +122,18 @@ class FakeDocker:
         n, _ = self._find(cid)
         del self.ctrs[n]
 
-    def remove_image(self, iid):
+    def remove_image(self, ref):
         self._maybe_fail("remove_image")
-        self.removed_image = iid
+        self.removed = getattr(self, "removed", []) + [ref]
+        if ref in self.tags:  # untag; deleting the last tag deletes the image
+            iid = self.tags.pop(ref)
+            if iid not in self.tags.values():
+                self.images.pop(iid, None)
+            return
+        if ref not in self.images:
+            from app.docker_api import DockerError
+            raise DockerError(404, "no such image")
+        self.images.pop(ref)
 
 
 @pytest.fixture

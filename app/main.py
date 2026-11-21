@@ -1,4 +1,5 @@
 import base64
+import re
 import logging
 import os
 import secrets
@@ -7,10 +8,11 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .docker_api import Docker
+from .registry import Registry
 from .updater import Updater
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -25,7 +27,8 @@ VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
 
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
-             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False))
+             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry())
+TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
 
@@ -101,6 +104,21 @@ def check(name: str):
 @app.post("/api/containers/{name}/update")
 def update(name: str, force: bool = False):
     return bg(up.update, name, force)
+
+
+@app.get("/api/containers/{name}/tags")
+def tags(name: str):
+    try:
+        return up.tags(name)
+    except Exception as e:
+        raise HTTPException(502, f"could not list tags: {e}")
+
+
+@app.post("/api/containers/{name}/deploy")
+def deploy(name: str, tag: str):
+    if not TAG_RE.match(tag):
+        raise HTTPException(400, "invalid tag")
+    return bg(up.deploy, name, tag)
 
 
 @app.post("/api/check-all")

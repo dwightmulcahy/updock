@@ -32,6 +32,14 @@
   #logs { margin-top:24px; background:var(--panel); border-radius:8px; padding:12px; height:220px; overflow:auto;
           font:12px/1.5 ui-monospace,monospace; color:var(--dim); }
   #logs .ERROR { color:var(--err); } #logs .WARNING { color:var(--warn); }
+  .deployed { background:#2a1f3d; color:#b48cff; }
+  .img { font-size:12px; color:var(--dim); line-height:1.5; }
+  .img .v { color:var(--text); font-size:13px; }
+  .newer .v { color:var(--warn); }
+  dialog { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:20px; min-width:360px; }
+  dialog::backdrop { background:#0008; }
+  dialog select { width:100%; margin:12px 0; padding:6px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit; }
+  dialog .row { display:flex; gap:8px; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -43,16 +51,53 @@
 </header>
 <main>
   <table>
-    <thead><tr><th>Container</th><th>Image</th><th>State</th><th>Update</th><th>Last check</th><th></th></tr></thead>
+    <thead><tr><th>Container</th><th>Running</th><th>Latest available</th><th>State</th><th>Update</th><th>Last check</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
   <div id="logs"></div>
 </main>
+<dialog id="vdlg">
+  <b id="vtitle"></b>
+  <div class="meta" id="vinfo">Loading tags…</div>
+  <select id="vsel" size="10"></select>
+  <div class="row">
+    <button onclick="vdlg.close()">Cancel</button>
+    <button class="primary" id="vdeploy" disabled onclick="deployTag()">Deploy</button>
+  </div>
+</dialog>
 <script>
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ago = t => { if (!t) return "—"; const s = Date.now()/1000 - t;
   return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s/60)}m ago` : s < 86400 ? `${Math.floor(s/3600)}h ago` : `${Math.floor(s/86400)}d ago`; };
 const busy = j => j === "pulling" || j === "updating";
+const short = d => d ? d.replace("sha256:", "").slice(0, 12) : "";
+const imgCell = (i, cls = "") => !i ? '<span class="img">—</span>' : `<div class="img ${cls}">
+  <div class="v">${esc(i.version || "no version label")}</div>
+  <div>id <code>${esc(i.id)}</code>${i.digest ? ` · digest <code>${esc(short(i.digest))}</code>` : ""}</div>
+  ${i.revision ? `<div>rev <code>${esc(i.revision)}</code></div>` : ""}
+  ${i.created ? `<div>built ${esc(new Date(i.created).toLocaleDateString())}</div>` : ""}</div>`;
+
+let vname = null;
+async function openVersions(name) {
+  vname = name;
+  const sel = document.getElementById("vsel"), info = document.getElementById("vinfo"), btn = document.getElementById("vdeploy");
+  document.getElementById("vtitle").textContent = `Deploy a version of ${name}`;
+  sel.innerHTML = ""; btn.disabled = true; info.textContent = "Loading tags…";
+  vdlg.showModal();
+  const r = await fetch(`/api/containers/${encodeURIComponent(name)}/tags`);
+  const d = await r.json();
+  if (!r.ok) { info.textContent = d.detail || "Failed to load tags"; return; }
+  info.textContent = `${d.image} — ${d.tags.length} tags, current: ${d.current || "pinned"}`;
+  sel.innerHTML = d.tags.map(t => `<option value="${esc(t)}"${t === d.current ? " selected" : ""}>${esc(t)}${t === d.current ? "  (current)" : ""}</option>`).join("");
+  sel.onchange = () => btn.disabled = !sel.value;
+  btn.disabled = !sel.value;
+}
+async function deployTag() {
+  const tag = document.getElementById("vsel").value;
+  if (!tag || !confirm(`Deploy ${vname} with tag "${tag}"?`)) return;
+  vdlg.close();
+  await post(`/api/containers/${encodeURIComponent(vname)}/deploy?tag=${encodeURIComponent(tag)}`);
+}
 
 async function post(url) { await fetch(url, {method:"POST"}); setTimeout(refresh, 300); }
 
@@ -66,7 +111,8 @@ async function refresh() {
       const n = encodeURIComponent(c.name), dis = busy(c.job) || !c.eligible ? "disabled" : "";
       return `<tr>
         <td><b>${esc(c.name)}</b>${c.eligible ? "" : ' <span class="badge">excluded</span>'}</td>
-        <td>${esc(c.image)}<br><code>${esc(c.image_id)}</code></td>
+        <td><div>${esc(c.image)}</div>${imgCell(c.current)}</td>
+        <td>${c.latest ? (c.current && c.latest.id === c.current.id ? '<span class="img">same as running</span>' : imgCell(c.latest, "newer")) : '<span class="img">not checked</span>'}</td>
         <td>${esc(c.status)}</td>
         <td><span class="badge ${esc(c.job)}">${esc(c.job || "unchecked")}</span>
             ${c.job === "error" ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
@@ -75,6 +121,7 @@ async function refresh() {
           <button ${dis} onclick="post('/api/containers/${n}/check')">Check</button>
           <button ${dis} class="primary" onclick="post('/api/containers/${n}/update')">Update now</button>
           <button ${dis} title="Recreate even if image unchanged" onclick="if(confirm('Recreate ${esc(c.name)}?'))post('/api/containers/${n}/update?force=true')">Recreate</button>
+          <button ${dis} title="Deploy a specific (e.g. older) tag" onclick="openVersions('${esc(c.name)}')">Versions…</button>
         </div></td></tr>`;
     }).join("");
     const l = await (await fetch("/api/logs")).json(), box = document.getElementById("logs");

@@ -6,6 +6,8 @@ ARG GIT_SHA=
 ENV APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA} \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
+# Pick up Debian security fixes released after the pinned base image
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # Runtime needs no package manager (and its bundled CVEs)

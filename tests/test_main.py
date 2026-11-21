@@ -132,3 +132,19 @@ def test_scheduler_survives_errors(up, monkeypatch):
     up.run_all.side_effect = RuntimeError("boom")
     _run_scheduler(monkeypatch, loops=2)
     assert up.run_all.call_count == 2
+
+
+def test_tags_endpoint(client, up):
+    up.tags.return_value = {"image": "x", "current": "1", "tags": ["2", "1"]}
+    assert client.get("/api/containers/web/tags").json()["tags"] == ["2", "1"]
+    up.tags.side_effect = RuntimeError("registry down")
+    r = client.get("/api/containers/web/tags")
+    assert r.status_code == 502 and "registry down" in r.json()["detail"]
+
+
+def test_deploy_endpoint(client, up):
+    assert client.post("/api/containers/web/deploy?tag=1.2.3-alpine").status_code == 202
+    up.deploy.assert_called_with("web", "1.2.3-alpine")
+    for bad in ("-x", "a/b", "a:b", "x" * 129):
+        assert client.post("/api/containers/web/deploy", params={"tag": bad}).status_code == 400
+    assert client.post("/api/containers/web/deploy").status_code == 422

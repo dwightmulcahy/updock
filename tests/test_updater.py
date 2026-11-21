@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from app.updater import Updater, build_create_body
+from app.updater import Updater, base_repo, build_create_body, image_info
 from conftest import CID, IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 
@@ -192,14 +192,13 @@ def test_update_noop_when_current(up, fake):
 
 def test_update_full_flow(up, fake):
     fake.add(make_ctr())
-    fake.add(make_ctr("other", cid="o" * 64))  # shares old image? no: other uses OLD_IMG too
     publish_new(fake)
     up.update("web")
     assert up.state["web"]["job"] == "updated"
     assert fake.ctrs["web"]["Image"] == NEW_IMG
     assert "web-updock-old" not in fake.ctrs
     assert fake.connected == [("net2", {"Aliases": ["webby"]})]
-    assert fake.removed_image == OLD_IMG
+    assert fake.removed == [OLD_IMG] and OLD_IMG not in fake.images
     assert fake.stop_timeout == 10
     assert up.logs[-1]["msg"] == "web: updated"
 
@@ -310,3 +309,158 @@ def test_run_all(up, fake, monkeypatch):
     up.run_all(update=False)
     assert seen == [("u", "web"), ("c", "web")]
     assert up.logs[-1]["msg"] == "Run finished"
+
+
+def test_body_image_ref_override():
+    body, _ = build_create_body(make_ctr(), IMG_CFG, "test/app:1.0")
+    assert body["Image"] == "test/app:1.0"
+
+
+# ---------- image info / listing ----------
+
+def test_image_info_labels_and_digest():
+    info = image_info({"Id": "sha256:" + "a" * 64, "RepoDigests": ["x@sha256:" + "d" * 64],
+                       "RepoTags": ["x:1"], "Created": "2026-01-01T00:00:00Z",
+                       "Config": {"Labels": {"org.opencontainers.image.version": "1.2.3",
+                                             "org.opencontainers.image.revision": "f" * 40}}})
+    assert info == {"id": "a" * 12, "digest": "sha256:" + "d" * 64, "tags": ["x:1"],
+                    "version": "1.2.3", "revision": "f" * 12, "created": "2026-01-01T00:00:00Z"}
+
+
+def test_image_info_fallback_labels_and_missing():
+    info = image_info({"Id": "sha256:b", "Config": {"Labels": {"build_version": "v9"}}})
+    assert info["version"] == "v9" and info["digest"] is None and info["revision"] is None
+    assert image_info({"Id": "sha256:c", "Config": None})["version"] is None
+
+
+def test_base_repo():
+    assert base_repo("ghcr.io/o/app:1") == "ghcr.io/o/app"
+    assert base_repo("nginx@sha256:abc") == "nginx"
+
+
+def test_list_shows_current_latest_and_ref(up, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    up.check("web")
+    row = up.list()[0]
+    assert row["image"] == "test/app:latest" and "ref" not in row
+    assert row["current"]["id"] == "old" and row["latest"]["id"] == "new"
+    assert row["update_available"] is True
+
+
+def test_list_image_info_cached_and_missing(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    up.list()
+    calls = []
+    monkeypatch.setattr(fake, "image", lambda r: calls.append(r))
+    up.list()
+    assert calls == []  # cached
+    fake.ctrs["web"]["Image"] = "sha256:gone"
+    fake.images.pop("sha256:gone", None)
+    monkeypatch.undo()
+    assert up.list()[0]["current"] is None
+
+
+# ---------- old image cleanup ----------
+
+def test_cleanup_untags_same_repo_tags(up, fake):
+    fake.add(make_ctr())
+    fake.tags["test/app:1.0"] = OLD_IMG  # old image also carries a version tag
+    publish_new(fake)
+    up.update("web")
+    assert "test/app:1.0" not in fake.tags and OLD_IMG not in fake.images
+    assert fake.removed == ["test/app:1.0", OLD_IMG]
+    assert any("removed old image" in entry["msg"] for entry in up.logs)
+
+
+def test_cleanup_keeps_image_used_by_other_container(up, fake):
+    fake.add(make_ctr())
+    fake.add(make_ctr("other", cid="o" * 64))
+    publish_new(fake)
+    up.update("web")
+    assert OLD_IMG in fake.images
+    assert any("used by other" in entry["msg"] for entry in up.logs)
+
+
+def test_cleanup_keeps_image_with_foreign_tag(up, fake):
+    fake.add(make_ctr())
+    fake.tags["mirror/app:keep"] = OLD_IMG
+    publish_new(fake)
+    up.update("web")
+    assert OLD_IMG in fake.images
+    assert any("also tagged mirror/app:keep" in entry["msg"] for entry in up.logs)
+
+
+def test_cleanup_reports_unexpected_errors(up, fake):
+    from app.docker_api import DockerError
+    fake.add(make_ctr())
+    publish_new(fake)
+    fake.fail["remove_image"] = DockerError(409, "conflict")
+    up.update("web")
+    assert up.state["web"]["job"] == "updated"
+    assert any("could not remove old image" in entry["msg"] for entry in up.logs)
+
+
+def test_remove_old_image_tolerates_404_after_untag(up, fake, monkeypatch):
+    from app.docker_api import DockerError
+    fake.tags["test/app:1.0"] = OLD_IMG
+    real = fake.remove_image
+
+    def rm(ref):
+        if ref == OLD_IMG:
+            raise DockerError(404, "gone")
+        real(ref)
+    monkeypatch.setattr(fake, "remove_image", rm)
+    assert up.remove_old_image(OLD_IMG, "test/app:latest") is True
+
+
+# ---------- tags / deploy ----------
+
+class FakeRegistry:
+    def __init__(self, tags):
+        self._tags = tags
+        self.refs = []
+
+    def tags(self, ref):
+        self.refs.append(ref)
+        return self._tags
+
+
+def test_tags_lists_registry(fake):
+    fake.add(make_ctr())
+    u = Updater(fake, registry=FakeRegistry(["2.0", "1.0"]))
+    assert u.tags("web") == {"image": "test/app", "current": "latest", "tags": ["2.0", "1.0"]}
+
+
+def test_tags_without_registry(up, fake):
+    fake.add(make_ctr())
+    with pytest.raises(RuntimeError):
+        up.tags("web")
+
+
+def test_deploy_older_tag_keeps_previous_image(up, fake):
+    fake.add(make_ctr())
+    fake.images["sha256:v1"] = {"Id": "sha256:v1", "Config": IMG_CFG}
+    fake.tags["test/app:1.0"] = "sha256:v1"
+    up.deploy("web", "1.0")
+    assert fake.pulled == "test/app:1.0"
+    assert fake.created_body["Image"] == "test/app:1.0"
+    assert fake.ctrs["web"]["Image"] == "sha256:v1"
+    assert OLD_IMG in fake.images and "remove_image" not in fake.calls
+    st = up.state["web"]
+    assert st["job"] == "deployed" and st["ref"] == "test/app:1.0"
+    assert up.list()[0]["image"] == "test/app:1.0"
+
+
+def test_deploy_from_digest_pinned(up, fake):
+    fake.add(make_ctr(image="test/app@sha256:abc"))
+    fake.tags["test/app:2.0"] = OLD_IMG
+    up.deploy("web", "2.0")
+    assert fake.created_body["Image"] == "test/app:2.0"
+
+
+def test_deploy_pull_failure(up, fake):
+    fake.add(make_ctr())
+    fake.fail["pull"] = RuntimeError("manifest unknown")
+    up.deploy("web", "nope")
+    assert up.state["web"]["job"] == "error" and "create" not in fake.calls

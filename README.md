@@ -34,9 +34,19 @@ container only so it can reach the mounted Docker socket.
 
 1. Pulls each container's image tag (`nginx:latest`, etc.).
 2. If the pulled image ID differs from the running one, it stops the container, renames it, creates a replacement with the same config (env, ports, volumes incl. anonymous ones, networks + aliases, labels, restart policy), and starts it.
-3. On failure it rolls back to the old container. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image.
+3. On failure it rolls back to the old container. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image (see below).
 
 Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the new image's defaults apply; values you set yourself are kept.
+
+### Versions
+
+For every container the UI shows the **running** image and, after a check, the **latest available** image: version label (`org.opencontainers.image.version`, falling back to `org.label-schema.version` / `build_version`), image ID, registry digest, VCS revision, and build date.
+
+**Versions…** lists the tags published for the container's image (Docker Hub, GHCR, Quay, LSCR or any v2 registry; private ones via the mounted `config.json`), newest version first. Deploying a tag recreates the container from `repo:<tag>`, so it stays on that tag; deploy `latest` (or the tag you track) to resume normal updates. The previous image is kept after a version deploy so switching back is instant.
+
+### Old image cleanup
+
+After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.
 
 ## UI / API
 
@@ -47,6 +57,8 @@ Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the 
 | Check (pull only) | `POST /api/containers/{name}/check` |
 | Update now | `POST /api/containers/{name}/update` |
 | Recreate even if unchanged | `POST /api/containers/{name}/update?force=true` |
+| List registry tags | `GET /api/containers/{name}/tags` |
+| Deploy a specific tag | `POST /api/containers/{name}/deploy?tag=1.2.3` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
 | Logs | `GET /api/logs` |
 
@@ -61,7 +73,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 |---|---|---|
 | `UPDOCK_INTERVAL` | `86400` | Seconds between scheduled runs; `0` disables the schedule |
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |
-| `UPDOCK_CLEANUP` | `true` | Remove old image after update |
+| `UPDOCK_CLEANUP` | `true` | Delete the superseded image after an update |
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
