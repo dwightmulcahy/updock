@@ -206,7 +206,7 @@ def test_remote_info_index_platform_selection(mk):
     r, _ = mk(h)
     info = r.remote_info("ghcr.io/o/app:latest", {"os": "linux", "architecture": "arm64", "variant": "v8"})
     assert info == {"id": "1" * 12, "digest": "sha256:idx", "tags": [], "version": "2.1.0",
-                    "revision": "a" * 12, "created": "2026-11-01T00:00:00Z"}
+                    "revision": "a" * 12, "created": "2026-11-01T00:00:00Z", "source": None}
     assert ("GET", "/v2/o/app/manifests/sha256:m1", calls[1][2]) in calls
 
 

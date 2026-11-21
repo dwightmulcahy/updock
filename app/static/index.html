@@ -59,6 +59,7 @@
   #vdetail code { color:var(--text); }
   .img { font-size:12px; color:var(--dim); line-height:1.5; }
   .img .v { color:var(--text); font-size:13px; }
+  .img a.notes { color:var(--accent); text-decoration:none; } .img a.notes:hover { text-decoration:underline; }
   .newer .v { color:var(--warn); }
   dialog { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:20px; min-width:360px; }
   dialog::backdrop { background:#0008; }
@@ -115,12 +116,14 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const ago = t => { if (!t) return "—"; const s = Date.now()/1000 - t;
   return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s/60)}m ago` : s < 86400 ? `${Math.floor(s/3600)}h ago` : `${Math.floor(s/86400)}d ago`; };
 const busy = j => j === "pulling" || j === "updating" || j === "checking";
+const safeUrl = u => typeof u === "string" && /^https?:\/\//i.test(u);
 const short = d => d ? d.replace("sha256:", "").slice(0, 12) : "";
 const imgCell = (i, cls = "") => !i ? '<span class="img">—</span>' : `<div class="img ${cls}">
   <div class="v">${esc(i.version || "no version label")}</div>
   <div>${[i.id ? `id <code>${esc(i.id)}</code>` : "", i.digest ? `digest <code>${esc(short(i.digest))}</code>` : ""].filter(Boolean).join(" · ")}</div>
   ${i.revision ? `<div>rev <code>${esc(i.revision)}</code></div>` : ""}
-  ${i.created ? `<div>built ${esc(new Date(i.created).toLocaleDateString())}</div>` : ""}</div>`;
+  ${i.created ? `<div>built ${esc(new Date(i.created).toLocaleDateString())}</div>` : ""}
+  ${safeUrl(i.changelog) ? `<div><a class="notes" href="${esc(i.changelog)}" target="_blank" rel="noopener noreferrer">release notes ↗</a></div>` : ""}</div>`;
 
 let vname = null;
 async function openVersions(name) {
@@ -148,7 +151,8 @@ async function showTag(name, tag) {
   box.innerHTML = !r.ok ? esc(d.detail || "Could not read tag details")
     : [`<b>${esc(d.version || "no version label")}</b>`,
        [d.id ? `id <code>${esc(d.id)}</code>` : "", d.digest ? `digest <code>${esc(short(d.digest))}</code>` : ""].filter(Boolean).join(" · "),
-       [d.revision ? `rev <code>${esc(d.revision)}</code>` : "", d.created ? `built ${esc(new Date(d.created).toLocaleString())}` : ""].filter(Boolean).join(" · ")
+       [d.revision ? `rev <code>${esc(d.revision)}</code>` : "", d.created ? `built ${esc(new Date(d.created).toLocaleString())}` : ""].filter(Boolean).join(" · "),
+       safeUrl(d.changelog) ? `<a class="notes" href="${esc(d.changelog)}" target="_blank" rel="noopener noreferrer">release notes ↗</a>` : ""
       ].filter(Boolean).join("<br>");
 }
 async function deployTag() {
