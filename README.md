@@ -18,7 +18,7 @@ curl http://localhost:8080/health
 # UI: http://localhost:8080
 ```
 
-Published image: `ghcr.io/dwightmulcahy/updock`.
+Published image: `ghcr.io/dwightmulcahy/updock`, for `linux/amd64`, `linux/arm64` and `linux/arm/v7` (32-bit Raspberry Pi OS, older ARM NAS boxes).
 
 QNAP: `docker compose -f compose.qnap.yaml pull && docker compose -f compose.qnap.yaml up -d`
 
@@ -291,7 +291,7 @@ Trivy. Dependabot keeps those pins reviewable and current.
 1. Merge to `main`.
 2. `git tag v1.2.3 && git push origin v1.2.3`
 3. The Release workflow verifies the tag is on `main`, reruns CI, and publishes
-   the multi-architecture image and grouped Conventional Commit release notes.
+   the multi-architecture image (amd64, arm64, arm/v7) and grouped Conventional Commit release notes.
 
 For the newest stable `v1.2.3` release, the image receives `1.2.3`, `1.2`, `1`,
 and `latest`. Older releases publish only their exact version, so rerunning or
