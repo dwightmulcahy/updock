@@ -117,6 +117,17 @@ labels:
 
 Set `UPDOCK_DISK_MAX` (e.g. `40GB`) and/or `UPDOCK_DISK_WARN` (a size, or a percentage of the max such as `80%`). At the start of each scheduled run (and **Update all**), Updock reads Docker's image storage (`docker system df`). At or over the max, the run only checks — nothing new is downloaded — and you get a `disk` email; over the warning level it logs a warning and emails once. If the usage can't be read, updates are skipped (fails closed). The header shows current image storage. This only covers Docker images, not volumes, logs or free space on the host; pair it with `UPDOCK_CLEANUP=true`.
 
+### Release notes links
+
+When an image says where its source lives (`org.opencontainers.image.source`, or the older `org.label-schema.vcs-url` / `…url` labels), the running and latest-available cells, the version picker and update/available emails link to its release notes: GitHub's releases page searched for that version (works whether tags are `v1.2` or `1.2`), GitLab's releases page, or the source URL elsewhere. Set a container label to point somewhere else, with `{version}` / `{source}` placeholders:
+
+```yaml
+labels:
+  updock.changelog-url: "https://example.com/app/changelog#{version}"
+```
+
+Only `http(s)` links are ever shown.
+
 ### Image cooldown
 
 Set `UPDOCK_COOLDOWN` (e.g. `24h`, `3d12h`) to make scheduled runs wait until a new image is at least that old before applying it. A compromised or broken release then has time to be noticed and pulled before it reaches you. The age comes from the image's build date, read from the registry without downloading the image; images with no (or a future) build date are not applied automatically. The row shows **cooldown** and when the update will be applied. Override per container with the label `updock.cooldown=12h` (`0` disables it for that container). **Update now** and version deploys ignore the cooldown.

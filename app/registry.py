@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from .docker_api import registry_credentials, split_ref
+from .changelog import source_of
 from .schedule import format_duration
 
 HUB_ALIASES = {"docker.io", "index.docker.io", "registry-1.docker.io"}
@@ -198,4 +199,5 @@ class Registry:
             "version": next((labels[k] for k in VERSION_LABELS if labels.get(k)), None),
             "revision": next((labels[k][:12] for k in REVISION_LABELS if labels.get(k)), None),
             "created": cfg.get("created"),
+            "source": source_of(labels),
         }

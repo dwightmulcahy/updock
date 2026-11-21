@@ -324,7 +324,8 @@ def test_image_info_labels_and_digest():
                        "Config": {"Labels": {"org.opencontainers.image.version": "1.2.3",
                                              "org.opencontainers.image.revision": "f" * 40}}})
     assert info == {"id": "a" * 12, "digest": "sha256:" + "d" * 64, "tags": ["x:1"],
-                    "version": "1.2.3", "revision": "f" * 12, "created": "2026-01-01T00:00:00Z"}
+                    "version": "1.2.3", "revision": "f" * 12, "created": "2026-01-01T00:00:00Z",
+                    "source": None}
 
 
 def test_image_info_fallback_labels_and_missing():
@@ -1726,3 +1727,49 @@ def test_update_pull_after_digest_rate_limited(fake):
     fake.fail["pull"] = DockerError(500, "Error response: 429 Too Many Requests")
     u.update("web")
     assert u.state["web"]["job"] == "rate-limited" and "create" not in fake.calls
+
+
+
+# ---------- changelog links ----------
+
+GH = {"org.opencontainers.image.source": "https://github.com/acme/app.git",
+      "org.opencontainers.image.version": "2.0"}
+
+
+def test_list_adds_release_notes_links(up, fake):
+    fake.images[OLD_IMG]["Config"] = {**IMG_CFG, "Labels": {**GH, "org.opencontainers.image.version": "1.0"}}
+    fake.add(make_ctr())
+    publish_new(fake)
+    fake.images[NEW_IMG]["Config"] = {**IMG_CFG, "Labels": GH}
+    up.check("web")
+    row = up.list()[0]
+    assert row["current"]["changelog"] == "https://github.com/acme/app/releases?q=1.0&expanded=true"
+    assert row["latest"]["changelog"] == "https://github.com/acme/app/releases?q=2.0&expanded=true"
+    assert "changelog" not in up.state["web"]["latest"]  # state itself untouched
+
+
+def test_changelog_template_label(up, fake):
+    c = make_ctr()
+    c["Config"]["Labels"]["updock.changelog-url"] = "https://example.com/notes/{version}"
+    fake.images[OLD_IMG]["Config"] = {**IMG_CFG, "Labels": GH}
+    fake.add(c)
+    assert up.list()[0]["current"]["changelog"] == "https://example.com/notes/2.0"
+
+
+def test_update_email_includes_release_notes(nup, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    fake.images[NEW_IMG]["Config"] = {**IMG_CFG, "Labels": GH}
+    nup.update("web")
+    msg = nup.notifier.items[0][2]
+    assert msg.endswith("\nRelease notes: https://github.com/acme/app/releases?q=2.0&expanded=true")
+
+
+def test_tag_info_includes_changelog(fake):
+    reg = DigestRegistry(info={"id": "x", "digest": "d", "tags": [], "version": "3.1",
+                               "revision": None, "created": None,
+                               "source": "https://github.com/acme/app"})
+    fake.add(make_ctr())
+    u = Updater(fake, registry=reg)
+    assert u.tag_info("web", "3.1")["changelog"] == \
+        "https://github.com/acme/app/releases?q=3.1&expanded=true"

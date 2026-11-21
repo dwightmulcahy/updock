@@ -7,6 +7,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 
+from .changelog import TEMPLATE_LABEL, changelog_url, source_of
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
@@ -164,6 +165,7 @@ def image_info(img):
         "version": next((labels[k] for k in VERSION_LABELS if labels.get(k)), None),
         "revision": next((labels[k][:12] for k in REVISION_LABELS if labels.get(k)), None),
         "created": img.get("Created"),
+        "source": source_of(labels),
     }
 
 
@@ -247,10 +249,14 @@ class Updater:
             name = c["Names"][0].lstrip("/")
             st = dict(self.state.get(name, {}))
             ref = st.pop("ref", None) or c["Image"]
-            out.append({"name": name, "image": ref, "image_id": c["ImageID"][7:19],
-                        "state": c["State"], "status": c["Status"],
-                        "eligible": self.eligible(c), "current": self._image_info(c["ImageID"]),
-                        **st})
+            row = {"name": name, "image": ref, "image_id": c["ImageID"][7:19],
+                   "state": c["State"], "status": c["Status"],
+                   "eligible": self.eligible(c), "current": self._image_info(c["ImageID"]), **st}
+            template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
+            for key in ("current", "latest"):
+                if isinstance(row.get(key), dict):
+                    row[key] = {**row[key], "changelog": self.changelog(row[key], template)}
+            out.append(row)
         return sorted(out, key=lambda x: x["name"])
 
     def check(self, name):
@@ -545,7 +551,13 @@ class Updater:
         new = self.state[name].get("latest") or {}
         fmt = lambda i: " ".join(x for x in (i.get("version") or "",
                                               f"({i['id']})" if i.get("id") else "") if x) or "?"
-        return f"{ctr['Config']['Image']} {fmt(old)} -> {fmt(new)}"
+        text = f"{ctr['Config']['Image']} {fmt(old)} -> {fmt(new)}"
+        notes = self.changelog(new, (ctr["Config"].get("Labels") or {}).get(TEMPLATE_LABEL))
+        return text + (f"\nRelease notes: {notes}" if notes else "")
+
+    @staticmethod
+    def changelog(info, template=None):
+        return changelog_url(info.get("source"), info.get("version"), template)
 
     def pin(self, name, pinned):
         """Pinned containers are checked but never updated by scheduled runs."""
@@ -566,7 +578,9 @@ class Updater:
         except Exception:
             platform = None
         ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
-        return {"ref": ref, **self.registry.remote_info(ref, platform)}
+        info = {"ref": ref, **self.registry.remote_info(ref, platform)}
+        info["changelog"] = self.changelog(info, (ctr["Config"].get("Labels") or {}).get(TEMPLATE_LABEL))
+        return info
 
     def tags(self, name):
         if not self.registry:
