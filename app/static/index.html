@@ -145,8 +145,12 @@ async function refresh() {
   try {
     const r = await fetch("/api/containers"); const d = await r.json();
     document.getElementById("ver").textContent = d.version === "dev" ? "dev" : `v${d.version}`;
-    document.getElementById("next").textContent = d.next_run
+    const sc = d.schedule || {}, nx = document.getElementById("next");
+    nx.textContent = d.next_run
       ? `Next ${d.auto_update ? "update" : "check"}: ${new Date(d.next_run*1000).toLocaleString()}` : "Schedule off";
+    nx.title = [sc.cron ? `cron "${sc.cron}" (${sc.tz})` : sc.interval ? `every ${sc.interval}s` : "",
+                sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
+    if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     document.getElementById("rows").innerHTML = d.containers.map(c => {
       const n = encodeURIComponent(c.name), dis = busy(c.job) || !c.eligible ? "disabled" : "";
       return `<tr>

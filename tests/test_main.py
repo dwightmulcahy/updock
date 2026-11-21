@@ -46,7 +46,7 @@ def test_index(client):
 def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
-        "version": main.VERSION}
+        "version": main.VERSION, "schedule": main.schedule_info()}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -138,37 +138,108 @@ class StopLoop(BaseException):
     pass
 
 
-def _run_scheduler(monkeypatch, loops, run_on_start="false"):
+class FakeTime:
+    def __init__(self, t=1_800_000_000.0):
+        self.t, self.sleeps = t, []
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.t += s
+
+
+def _run_scheduler(monkeypatch, runs, run_on_start="false", interval=150, cron=None, window=None):
     monkeypatch.setenv("UPDOCK_RUN_ON_START", run_on_start)
-    monkeypatch.setattr(main, "INTERVAL", 60)
-    calls = {"n": 0}
+    monkeypatch.setattr(main, "INTERVAL", interval)
+    monkeypatch.setattr(main, "CRON", cron)
+    monkeypatch.setattr(main, "WINDOW", window)
+    ft = FakeTime()
+    monkeypatch.setattr(main.time, "time", ft.time)
+    monkeypatch.setattr(main.time, "sleep", ft.sleep)
+    calls = []
+    real = main.scheduled_run
 
-    def fake_sleep(s):
-        assert s == 60
-        calls["n"] += 1
-        if calls["n"] > loops:
+    def counting():
+        calls.append(ft.t)
+        if len(calls) > runs:
             raise StopLoop
-
-    monkeypatch.setattr(main.time, "sleep", fake_sleep)
+        real()
+    monkeypatch.setattr(main, "scheduled_run", counting)
     with pytest.raises(StopLoop):
         main.scheduler()
+    return ft, calls
 
 
-def test_scheduler_runs_each_interval(up, monkeypatch):
-    _run_scheduler(monkeypatch, loops=2)
+def test_scheduler_interval_naps_in_chunks(up, monkeypatch):
+    ft, calls = _run_scheduler(monkeypatch, runs=2)
     assert up.run_all.call_count == 2
-    assert main.next_run["t"] is not None
+    assert ft.sleeps[:3] == [60, 60, 30] and calls[1] - calls[0] == 150
+    assert main.next_run["t"] == calls[-1]
 
 
 def test_scheduler_run_on_start(up, monkeypatch):
-    _run_scheduler(monkeypatch, loops=0, run_on_start="true")
-    up.run_all.assert_called_once_with(main.AUTO_UPDATE)
+    _run_scheduler(monkeypatch, runs=1, run_on_start="true")
+    assert up.run_all.call_count == 1
+    up.run_all.assert_called_with(main.AUTO_UPDATE)
 
 
 def test_scheduler_survives_errors(up, monkeypatch):
     up.run_all.side_effect = RuntimeError("boom")
-    _run_scheduler(monkeypatch, loops=2)
+    _run_scheduler(monkeypatch, runs=2)
     assert up.run_all.call_count == 2
+
+
+def test_scheduler_cron_times(up, monkeypatch):
+    from datetime import datetime, timezone
+    from app.schedule import Cron
+    monkeypatch.setattr(main, "TZ", timezone.utc)
+    ft, calls = _run_scheduler(monkeypatch, runs=2, cron=Cron("30 4 * * *"))
+    times = [datetime.fromtimestamp(t, timezone.utc) for t in calls[:2]]
+    assert [(x.hour, x.minute) for x in times] == [(4, 30), (4, 30)]
+    assert calls[1] - calls[0] == 86400
+
+
+def test_scheduled_run_window(up, monkeypatch):
+    from datetime import timezone
+    from app.schedule import Window
+    monkeypatch.setattr(main, "TZ", timezone.utc)
+    monkeypatch.setattr(main, "AUTO_UPDATE", True)
+    hour = __import__("datetime").datetime.now(timezone.utc).hour
+    monkeypatch.setattr(main, "WINDOW", Window(f"{hour:02d}:00-{(hour + 1) % 24:02d}:00"))
+    main.scheduled_run()
+    up.run_all.assert_called_with(True)
+    monkeypatch.setattr(main, "WINDOW", Window(f"{(hour + 2) % 24:02d}:00-{(hour + 3) % 24:02d}:00"))
+    main.scheduled_run()
+    up.run_all.assert_called_with(False)
+    monkeypatch.setattr(main, "AUTO_UPDATE", False)
+    monkeypatch.setattr(main, "WINDOW", None)
+    main.scheduled_run()
+    up.run_all.assert_called_with(False)
+
+
+def test_schedule_info_and_tz(monkeypatch):
+    from app.schedule import Cron, Window
+    monkeypatch.setattr(main, "CRON", Cron("@daily"))
+    monkeypatch.setattr(main, "WINDOW", Window("02:00-05:00"))
+    monkeypatch.setattr(main, "TZ", main._tz("Europe/Berlin"))
+    assert main.schedule_info() == {"cron": "@daily", "interval": None, "window": "02:00-05:00",
+                                    "tz": "Europe/Berlin"}
+    monkeypatch.setattr(main, "CRON", None)
+    monkeypatch.setattr(main, "INTERVAL", 0)
+    assert main.schedule_info()["interval"] is None
+    assert str(main._tz("")) == "UTC" and str(main._tz("Not/AZone")) == "UTC"
+
+
+def test_lifespan_logs_cron(up, monkeypatch):
+    from app.schedule import Cron, Window
+    monkeypatch.setattr(main, "CRON", Cron("0 4 * * *"))
+    monkeypatch.setattr(main, "WINDOW", Window("02:00-05:00"))
+    monkeypatch.setattr(main, "scheduler", lambda: None)
+    with TestClient(main.app):
+        pass
+    assert len(SyncThread.started) == 1
 
 
 def test_tags_endpoint(client, up):

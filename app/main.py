@@ -6,6 +6,7 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -15,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from .docker_api import Docker
 from .notify import EmailNotifier
 from .registry import Registry
+from .schedule import Cron, Window
 from .updater import Updater
 
 from . import logs as logmod
@@ -25,6 +27,20 @@ LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_L
 env_bool = lambda k, d: os.getenv(k, str(d)).lower() in ("1", "true", "yes")
 INTERVAL = int(os.getenv("UPDOCK_INTERVAL", "86400"))  # seconds, 0 = UI only
 AUTO_UPDATE = env_bool("UPDOCK_AUTO_UPDATE", True)  # false = scheduled check only
+
+
+def _tz(name):
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(name) if name else timezone.utc
+    except Exception:
+        logging.getLogger("updock").warning("unknown TZ %r, using UTC", name)
+        return timezone.utc
+
+
+TZ = _tz(os.getenv("TZ", "").strip())
+CRON = Cron(os.environ["UPDOCK_SCHEDULE"]) if os.getenv("UPDOCK_SCHEDULE", "").strip() else None
+WINDOW = Window(os.environ["UPDOCK_WINDOW"]) if os.getenv("UPDOCK_WINDOW", "").strip() else None
 UI_USER = os.getenv("UPDOCK_USER", "admin")
 UI_PASS = os.getenv("UPDOCK_PASSWORD", "")
 VERSION = os.getenv("APP_VERSION") or "dev"
@@ -53,22 +69,52 @@ TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
 
+def next_due(now_ts):
+    if CRON:
+        return CRON.next(datetime.fromtimestamp(now_ts, TZ)).timestamp()
+    return now_ts + INTERVAL
+
+
+def scheduled_run():
+    update = AUTO_UPDATE
+    if update and WINDOW and not WINDOW.contains(datetime.now(TZ)):
+        logging.getLogger("updock").info(
+            "outside maintenance window %s: checking only", WINDOW, extra={"event": "run"})
+        update = False
+    up.run_all(update)
+
+
+def _safe_run():
+    try:
+        scheduled_run()
+    except Exception as e:
+        logging.getLogger("updock").exception("scheduled run failed: %s", e,
+                                              extra={"event": "run"})
+
+
 def scheduler():
     if env_bool("UPDOCK_RUN_ON_START", False):
-        up.run_all(AUTO_UPDATE)
+        _safe_run()
     while True:
-        next_run["t"] = time.time() + INTERVAL
-        time.sleep(INTERVAL)
-        try:
-            up.run_all(AUTO_UPDATE)
-        except Exception as e:
-            logging.getLogger("updock").exception("scheduled run failed: %s", e,
-                                                  extra={"event": "run"})
+        due = next_due(time.time())
+        next_run["t"] = due
+        while (remaining := due - time.time()) > 0:
+            time.sleep(min(remaining, 60))  # short naps survive clock changes / suspend
+        _safe_run()
+
+
+def schedule_info():
+    return {"cron": str(CRON) if CRON else None, "interval": None if CRON else INTERVAL or None,
+            "window": str(WINDOW) if WINDOW else None, "tz": str(TZ)}
 
 
 @asynccontextmanager
 async def lifespan(_):
-    if INTERVAL > 0:
+    if CRON or INTERVAL > 0:
+        logging.getLogger("updock").info(
+            "scheduler: %s, %s%s", f"cron '{CRON}' ({TZ})" if CRON else f"every {INTERVAL}s",
+            "auto-update" if AUTO_UPDATE else "check only",
+            f", maintenance window {WINDOW}" if WINDOW else "", extra={"event": "run"})
         threading.Thread(target=scheduler, daemon=True).start()
     yield
 
@@ -150,6 +196,7 @@ def index():
 @app.get("/api/containers")
 def containers():
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
+            "schedule": schedule_info(),
             "version": VERSION}
 
 
