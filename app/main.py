@@ -64,7 +64,8 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
              digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
              include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False),
-             cooldown=parse_duration(os.getenv("UPDOCK_COOLDOWN", "0")))
+             cooldown=parse_duration(os.getenv("UPDOCK_COOLDOWN", "0")),
+             hooks=env_bool("UPDOCK_HOOKS", False))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

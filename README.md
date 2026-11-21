@@ -51,6 +51,25 @@ Docker Compose projects are handled as a unit: within a project, services are up
 
 Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the new image's defaults apply; values you set yourself are kept.
 
+### Lifecycle hooks
+
+With `UPDOCK_HOOKS=true`, containers can declare commands that Updock runs inside them (via `docker exec`) around updates:
+
+| Label | Runs | On failure |
+|---|---|---|
+| `updock.hook.pre-check` | before each check | logged, continue |
+| `updock.hook.pre-update` | before the old container is stopped | exit `75` skips this update (try again next run); any other non-zero exit aborts it |
+| `updock.hook.post-update` | after the new container passed its health check | logged |
+| `updock.hook.post-check` | after each check/update, even if it failed | logged |
+
+Values run with `sh -c`, or give a JSON array (`["/app/backup","--fast"]`) for images without a shell. Each hook has a `-timeout` label (default `60s`, `0` = none), e.g. `updock.hook.pre-update-timeout=10m`. Hooks only run in running containers, and their exit code and output tail go to the log (`hook` events).
+
+```yaml
+labels:
+  updock.hook.pre-update: "pg_dump -U app app > /backups/before-update.sql"
+  updock.hook.pre-update-timeout: "10m"
+```
+
 ### Image cooldown
 
 Set `UPDOCK_COOLDOWN` (e.g. `24h`, `3d12h`) to make scheduled runs wait until a new image is at least that old before applying it. A compromised or broken release then has time to be noticed and pulled before it reaches you. The age comes from the image's build date, read from the registry without downloading the image; images with no (or a future) build date are not applied automatically. The row shows **cooldown** and when the update will be applied. Override per container with the label `updock.cooldown=12h` (`0` disables it for that container). **Update now** and version deploys ignore the cooldown.
@@ -130,6 +149,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
 | `UPDOCK_DIGEST_CHECK` | `true` | Check the registry digest before pulling; `false` = always pull to check |
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
