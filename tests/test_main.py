@@ -1,4 +1,5 @@
 import base64
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,7 +24,6 @@ class SyncThread:
 def up(monkeypatch):
     m = MagicMock()
     m.list.return_value = [{"name": "web"}]
-    m.logs = [{"msg": str(i)} for i in range(250)]
     monkeypatch.setattr(main, "up", m)
     monkeypatch.setattr(main.threading, "Thread", SyncThread)
     monkeypatch.setattr(main, "UI_PASS", "")
@@ -55,9 +55,46 @@ def test_health_bypasses_auth(client, monkeypatch):
     assert r.status_code == 200 and r.json()["status"] == "ok"
 
 
-def test_logs_truncated(client):
-    logs = client.get("/api/logs").json()
-    assert len(logs) == 200 and logs[-1]["msg"] == "249"
+@pytest.fixture
+def buf(monkeypatch):
+    from app.logs import LogBuffer
+    b = LogBuffer()
+    lg = logging.getLogger("t")
+    lg.addHandler(b)
+    lg.setLevel(logging.DEBUG)
+    lg.propagate = False
+    lg.info("hello", extra={"container": "web", "event": "check"})
+    lg.warning("careful", extra={"container": "db", "event": "pull"})
+    lg.error("broken thing")
+    monkeypatch.setattr(main, "LOGBUF", b)
+    yield b
+    lg.removeHandler(b)
+
+
+def test_logs_filters_and_facets(client, buf):
+    d = client.get("/api/logs").json()
+    assert [e["msg"] for e in d["entries"]] == ["hello", "careful", "broken thing"]
+    assert d["containers"] == ["db", "web"] and d["events"] == ["check", "pull"]
+    assert d["last_id"] == 3
+    msgs = lambda **p: [e["msg"] for e in client.get("/api/logs", params=p).json()["entries"]]
+    assert msgs(level="warning") == ["careful", "broken thing"]
+    assert msgs(container="web") == ["hello"]
+    assert msgs(event="pull") == ["careful"]
+    assert msgs(q="BROKEN") == ["broken thing"]
+    assert msgs(q="db") == ["careful"]  # search also matches container
+    assert msgs(after=2) == ["broken thing"]
+    assert msgs(limit=1) == ["broken thing"]
+    assert msgs(limit=-5) == ["hello", "careful", "broken thing"]
+
+
+def test_logs_download(client, buf):
+    r = client.get("/api/logs/download", params={"level": "WARNING"})
+    assert r.headers["content-disposition"].endswith('.log"')
+    lines = r.text.strip().splitlines()
+    assert len(lines) == 2 and "WARNING [db] (pull) careful" in lines[0]
+    r = client.get("/api/logs/download", params={"fmt": "json", "container": "web"})
+    assert r.headers["content-disposition"].endswith('.json"')
+    assert [e["msg"] for e in r.json()] == ["hello"]
 
 
 def test_actions(client, up):

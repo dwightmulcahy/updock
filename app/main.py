@@ -9,14 +9,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from .docker_api import Docker
 from .registry import Registry
 from .updater import Updater
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+from . import logs as logmod
+
+LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_LOG_FORMAT", "text"),
+                      int(os.getenv("UPDOCK_LOG_BUFFER", "2000")))
 
 env_bool = lambda k, d: os.getenv(k, str(d)).lower() in ("1", "true", "yes")
 INTERVAL = int(os.getenv("UPDOCK_INTERVAL", "86400"))  # seconds, 0 = UI only
@@ -27,7 +29,8 @@ VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
 
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
-             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry())
+             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
+             logbuf=LOGBUF)
 TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
@@ -41,7 +44,8 @@ def scheduler():
         try:
             up.run_all(AUTO_UPDATE)
         except Exception as e:
-            logging.exception("run failed: %s", e)
+            logging.getLogger("updock").exception("scheduled run failed: %s", e,
+                                                  extra={"event": "run"})
 
 
 @asynccontextmanager
@@ -91,9 +95,29 @@ def containers():
             "version": VERSION}
 
 
+def _log_query(level, container, event, q, after, since, limit):
+    return LOGBUF.query(level=level, container=container, event=event, q=q, after=after,
+                        since=since, limit=min(max(limit, 0), 5000))
+
+
 @app.get("/api/logs")
-def logs():
-    return list(up.logs)[-200:]
+def logs(level: str | None = None, container: str | None = None, event: str | None = None,
+         q: str | None = None, after: int | None = None, since: float | None = None,
+         limit: int = 500):
+    return {"entries": _log_query(level, container, event, q, after, since, limit),
+            **LOGBUF.facets()}
+
+
+@app.get("/api/logs/download")
+def logs_download(level: str | None = None, container: str | None = None,
+                  event: str | None = None, q: str | None = None, fmt: str = "text"):
+    entries = _log_query(level, container, event, q, None, None, 0)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if fmt == "json":
+        return JSONResponse(entries, headers={
+            "Content-Disposition": f'attachment; filename="updock-logs-{stamp}.json"'})
+    return PlainTextResponse("\n".join(logmod.format_text(e) for e in entries) + "\n", headers={
+        "Content-Disposition": f'attachment; filename="updock-logs-{stamp}.log"'})
 
 
 @app.post("/api/containers/{name}/check")
