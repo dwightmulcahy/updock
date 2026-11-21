@@ -228,7 +228,8 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 | `TZ` | `UTC` | Time zone for the cron expression and window, e.g. `America/Costa_Rica` |
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |
 | `UPDOCK_CLEANUP` | `true` | Delete the superseded image after an update |
-| `UPDOCK_INCLUDE_STOPPED` | `false` | Let scheduled runs update stopped containers too (they stay stopped) |
+| `UPDOCK_INCLUDE_STOPPED` | `false` | Let scheduled runs update stopped containers too (they stay stopped unless revived) |
+| `UPDOCK_REVIVE_STOPPED` | `false` | Start a stopped container after its image was updated; label `updock.revive=true\|false` overrides per container |
 | `UPDOCK_EXCLUDE` | empty | Container names to leave alone (globs, comma-separated) |
 | `UPDOCK_INCLUDE_IMAGES` / `UPDOCK_EXCLUDE_IMAGES` | empty | Only / never manage containers whose image matches (globs) |
 | `UPDOCK_SCOPE` | empty | Manage only containers labelled `updock.scope=<this>`; empty = only unscoped ones |
@@ -260,7 +261,7 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 
 The **excluded** badge's tooltip says which rule applies.
 
-Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
+Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 
 Private registries: mount `~/.docker/config.json` to `/config/config.json`. Inline `auths` entries work as-is; for `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`).
 

@@ -20,6 +20,7 @@ ENABLE_LABEL = "updock.enable"
 COOLDOWN_LABEL = "updock.cooldown"
 SCOPE_LABEL = "updock.scope"
 MONITOR_ONLY_LABEL = "updock.monitor-only"
+REVIVE_LABEL = "updock.revive"
 TRUE = {"1", "true", "yes", "on"}
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
@@ -182,7 +183,7 @@ class Updater:
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
                  digest_check=True, notifier=None, store=None, include_stopped=False,
                  cooldown=0, hooks=False, disk_max=0, disk_warn=0, exclude_names=(),
-                 include_images=(), exclude_images=(), scope=None):
+                 include_images=(), exclude_images=(), scope=None, revive_stopped=False):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -210,6 +211,7 @@ class Updater:
         self.include_images = [p for p in include_images if p]
         self.exclude_images = [p for p in exclude_images if p]
         self.scope = scope or None
+        self.revive_stopped = revive_stopped
         self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
@@ -275,6 +277,14 @@ class Updater:
 
     def eligible(self, c):
         return self.exclusion(c) is None
+
+    def revives(self, ctr):
+        """Start a stopped container after its image is updated? Label updock.revive
+        (true/false) overrides UPDOCK_REVIVE_STOPPED."""
+        v = (ctr["Config"].get("Labels") or {}).get(REVIVE_LABEL)
+        if v is None:
+            return self.revive_stopped
+        return str(v).lower() in TRUE
 
     def monitor_only(self, name, labels):
         """Pinned in the UI or labelled updock.monitor-only: scheduled runs only check."""
@@ -471,8 +481,12 @@ class Updater:
                 return
             self._set(name, job="updating", message="Recreating")
             change = self._describe_change(ctr)  # before cleanup removes the old image
+            revive = avail and not ctr["State"]["Running"] and self.revives(ctr)
+            if revive:
+                self._log("stopped, but will be started after the update (revive)",
+                          container=name, event="update")
             try:
-                self._recreate(ctr, cleanup=True)
+                self._recreate(ctr, cleanup=True, start=True if revive else None)
                 self._restart_compose_dependents(ctr)
             except UnhealthyError:
                 if avail:
@@ -676,7 +690,8 @@ class Updater:
                           "compose")
         if network_parent:
             body["HostConfig"]["NetworkMode"] = f"container:{network_parent}"
-        was_running = ctr["State"]["Running"] if start is None else start
+        orig_running = ctr["State"]["Running"]
+        was_running = orig_running if start is None else start  # start the new one?
         timeout = ctr["Config"].get("StopTimeout") or 10
 
         if not network_parent:
@@ -699,7 +714,7 @@ class Updater:
 
         self._log(f"recreating from {ref} (old image {old_img[7:19]})", container=name,
                   event="recreate")
-        if was_running:
+        if orig_running:
             self._log(f"stopping (timeout {timeout}s)", logging.DEBUG, name, "recreate")
             self.d.stop(old_id, timeout)
         self.d.rename(old_id, f"{name}-updock-old")
@@ -721,7 +736,7 @@ class Updater:
             if new_id:
                 self.d.remove(new_id)
             self.d.rename(old_id, name)
-            if was_running:
+            if orig_running:  # restore exactly what was there (a revived one stays stopped)
                 self.d.start(old_id)
             self._restart_dependents(deps, dep_running)
             self._log("previous container restored", logging.WARNING, name, "rollback")
