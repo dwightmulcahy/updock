@@ -99,3 +99,41 @@ def test_window(text, inside, outside):
 def test_window_invalid(text):
     with pytest.raises(ValueError, match="expected HH:MM-HH:MM"):
         Window(text)
+
+
+# ---------- durations / timestamps ----------
+
+from app.schedule import format_duration, parse_duration, parse_timestamp  # noqa: E402
+
+
+@pytest.mark.parametrize("text,secs", [
+    ("0", 0), ("90", 90), ("45s", 45), ("30m", 1800), ("24h", 86400), ("3d12h", 302400),
+    ("2w", 1209600), ("1M", 2592000), (" 1h 30m ", 5400), (7, 7),
+])
+def test_parse_duration(text, secs):
+    assert parse_duration(text) == secs
+
+
+@pytest.mark.parametrize("text", ["", "abc", "5y", "1h-", "-5", "1.5h"])
+def test_parse_duration_invalid(text):
+    with pytest.raises(ValueError, match="invalid duration"):
+        parse_duration(text)
+
+
+@pytest.mark.parametrize("secs,out", [(0, "0s"), (-5, "0s"), (59, "59s"), (90, "1m"),
+                                      (3700, "1h1m"), (90061, "1d1h")])
+def test_format_duration(secs, out):
+    assert format_duration(secs) == out
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2026-11-01T00:00:00Z", datetime(2026, 11, 1, tzinfo=UTC)),
+    ("2026-11-01T00:00:00.123456789Z", datetime(2026, 11, 1, 0, 0, 0, 123456, tzinfo=UTC)),
+    ("2026-11-01T02:00:00+02:00", datetime(2026, 11, 1, tzinfo=UTC)),
+    ("2026-11-01T02:00:00+0200", datetime(2026, 11, 1, tzinfo=UTC)),
+    ("2026-11-01T00:00:00", datetime(2026, 11, 1, tzinfo=UTC)),
+    ("1970-01-01T00:00:00Z", None),
+    ("yesterday", None), (None, None), ("", None),
+])
+def test_parse_timestamp(value, expected):
+    assert parse_timestamp(value) == expected

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from .docker_api import Docker
 from .notify import EmailNotifier
 from .registry import Registry
-from .schedule import Cron, Window
+from .schedule import Cron, Window, parse_duration
 from .store import Store
 from .updater import Updater
 
@@ -63,7 +63,8 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
              digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
-             include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False))
+             include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False),
+             cooldown=parse_duration(os.getenv("UPDOCK_COOLDOWN", "0")))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

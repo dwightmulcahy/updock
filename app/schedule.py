@@ -1,5 +1,6 @@
-"""Cron expressions (5-field) and maintenance windows, no external dependencies."""
-from datetime import timedelta
+"""Cron expressions, maintenance windows, durations and timestamps (no dependencies)."""
+import re
+from datetime import datetime, timedelta
 
 ALIASES = {"@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *",
            "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *",
@@ -103,3 +104,42 @@ class Window:
 
     def __str__(self):
         return self.text
+
+
+_DUR = re.compile(r"(\d+)\s*([smhdwM])")
+_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000}
+
+
+def parse_duration(text):
+    """'90' / '45s' / '24h' / '3d12h' / '2w' / '1M' (30 days) -> seconds."""
+    t = str(text).strip()
+    if t.isdigit():
+        return int(t)
+    if not t or _DUR.sub("", t).strip():
+        raise ValueError(f"invalid duration {text!r} (use e.g. 90, 30m, 24h, 3d12h, 2w)")
+    return sum(int(n) * _UNITS[u] for n, u in _DUR.findall(t))
+
+
+def format_duration(seconds):
+    seconds = int(max(0, seconds))
+    parts = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            parts.append(f"{seconds // size}{unit}")
+            seconds %= size
+    return "".join(parts[:2]) or f"{seconds}s"
+
+
+def parse_timestamp(value):
+    """RFC 3339 timestamp (Docker/OCI 'created', possibly with nanoseconds) -> aware datetime."""
+    if not value:
+        return None
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:?\d\d)?$",
+                 str(value).strip())
+    if not m:
+        return None
+    frac = (m[2] or "")[:7]  # '.' + up to 6 digits
+    tz = m[3] or "Z"
+    tz = "+00:00" if tz == "Z" else (tz if ":" in tz else f"{tz[:3]}:{tz[3:]}")
+    dt = datetime.fromisoformat(m[1] + frac + tz)
+    return dt if dt.year > 1970 else None  # reproducible builds use the epoch: unknown

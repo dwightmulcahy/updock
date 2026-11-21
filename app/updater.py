@@ -8,8 +8,10 @@ from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import REVISION_LABELS, VERSION_LABELS, RegistryError
+from .schedule import format_duration, parse_duration, parse_timestamp
 
 ENABLE_LABEL = "updock.enable"
+COOLDOWN_LABEL = "updock.cooldown"
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
                       "Healthcheck", "StopSignal", "OnBuild", "Shell")
@@ -147,7 +149,8 @@ def base_repo(ref):
 class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
-                 digest_check=True, notifier=None, store=None, include_stopped=False):
+                 digest_check=True, notifier=None, store=None, include_stopped=False,
+                 cooldown=0):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -167,6 +170,8 @@ class Updater:
         self.notifier = notifier or EmailNotifier()  # disabled unless configured
         self.store = store
         self.include_stopped = include_stopped
+        self.cooldown = cooldown
+        self._bad_labels = set()
         if store:
             for name, st in store.load_state().items():
                 self.state[name].update(st)
@@ -314,6 +319,12 @@ class Updater:
                 self._log(f"pull failed ({e}); recreating from local image",
                           logging.WARNING, name, "pull")
                 ctr, avail = self.d.inspect(name), False
+            if avail and scheduled:
+                blocked = self._cooldown_block(name, ctr)
+                if blocked:  # before pulling: a too-new image is never even downloaded
+                    self._set(name, job="cooldown", message=blocked)
+                    self._log(blocked, container=name, event="cooldown")
+                    return
             if avail and name in self._unpulled:
                 avail = self._pull(name, ctr, ctr["Config"]["Image"])
             if not (avail or force):
@@ -342,6 +353,38 @@ class Updater:
             if avail:
                 self.notifier.notify("update", name, change)
         self._locked(name, job)
+
+    def cooldown_for(self, name, ctr):
+        """Seconds a new image must age before scheduled runs apply it (label overrides)."""
+        raw = (ctr["Config"].get("Labels") or {}).get(COOLDOWN_LABEL)
+        if raw is None:
+            return self.cooldown
+        try:
+            return parse_duration(raw)
+        except ValueError:
+            if name not in self._bad_labels:
+                self._bad_labels.add(name)
+                self._log(f"invalid {COOLDOWN_LABEL}={raw!r}; using the global cooldown",
+                          logging.WARNING, name, "cooldown")
+            return self.cooldown
+
+    def _cooldown_block(self, name, ctr):
+        """Why the new image may not be applied yet, or None if it may."""
+        delay = self.cooldown_for(name, ctr)
+        if not delay:
+            return None
+        latest = self.state[name].get("latest") or {}
+        label = latest.get("version") or latest.get("id") or "new image"
+        created = parse_timestamp(latest.get("created"))
+        if created is None:
+            return f"cooldown: {label} has no build date; not applying it automatically"
+        age = time.time() - created.timestamp()
+        if age < 0:
+            return f"cooldown: {label} has a build date in the future; not applying it"
+        if age < delay:
+            return (f"cooldown: {label} is {format_duration(age)} old; "
+                    f"applying after {format_duration(delay)} (in {format_duration(delay - age)})")
+        return None
 
     def check_only(self, name, scheduled=False):
         def job():
