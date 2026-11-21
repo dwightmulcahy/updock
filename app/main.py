@@ -33,6 +33,7 @@ LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_L
                       int(os.getenv("UPDOCK_LOG_BUFFER", "2000")))
 
 env_bool = lambda k, d: os.getenv(k, str(d)).lower() in ("1", "true", "yes")
+env_list = lambda k: [x.strip() for x in os.getenv(k, "").split(",") if x.strip()]
 INTERVAL = int(os.getenv("UPDOCK_INTERVAL", "86400"))  # seconds, 0 = UI only
 AUTO_UPDATE = env_bool("UPDOCK_AUTO_UPDATE", True)  # false = scheduled check only
 
@@ -85,7 +86,11 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
              include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False),
              cooldown=parse_duration(os.getenv("UPDOCK_COOLDOWN", "0")),
-             hooks=env_bool("UPDOCK_HOOKS", False), disk_max=DISK_MAX, disk_warn=DISK_WARN)
+             hooks=env_bool("UPDOCK_HOOKS", False), disk_max=DISK_MAX, disk_warn=DISK_WARN,
+             exclude_names=env_list("UPDOCK_EXCLUDE"),
+             include_images=env_list("UPDOCK_INCLUDE_IMAGES"),
+             exclude_images=env_list("UPDOCK_EXCLUDE_IMAGES"),
+             scope=os.getenv("UPDOCK_SCOPE", "").strip() or None)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

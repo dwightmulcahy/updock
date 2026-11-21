@@ -1,3 +1,4 @@
+import fnmatch
 import io
 import json
 import logging
@@ -17,6 +18,9 @@ from .units import format_size
 
 ENABLE_LABEL = "updock.enable"
 COOLDOWN_LABEL = "updock.cooldown"
+SCOPE_LABEL = "updock.scope"
+MONITOR_ONLY_LABEL = "updock.monitor-only"
+TRUE = {"1", "true", "yes", "on"}
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
                       "Healthcheck", "StopSignal", "OnBuild", "Shell")
@@ -177,7 +181,8 @@ class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
                  digest_check=True, notifier=None, store=None, include_stopped=False,
-                 cooldown=0, hooks=False, disk_max=0, disk_warn=0):
+                 cooldown=0, hooks=False, disk_max=0, disk_warn=0, exclude_names=(),
+                 include_images=(), exclude_images=(), scope=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -201,6 +206,10 @@ class Updater:
         self.hooks = hooks
         self.disk_max, self.disk_warn = disk_max, disk_warn
         self._disk, self._disk_alerted = None, "ok"
+        self.exclude_names = [p for p in exclude_names if p]
+        self.include_images = [p for p in include_images if p]
+        self.exclude_images = [p for p in exclude_images if p]
+        self.scope = scope or None
         self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
@@ -236,12 +245,41 @@ class Updater:
                 return None
         return self._img_cache[iid]
 
-    def eligible(self, c):
+    def exclusion(self, c):
+        """Why Updock leaves this container alone, or None if it may manage it."""
         labels = c.get("Labels") or {}
+        name = c["Names"][0].lstrip("/")
         if labels.get(SELF_LABEL) == "true" or (self.self_id and c["Id"].startswith(self.self_id)):
-            return False
+            return "this is Updock"
+        scope = labels.get(SCOPE_LABEL) or None
+        if scope != self.scope:
+            return (f"scope '{scope}' belongs to another Updock" if scope else
+                    f"not in scope '{self.scope}'")
         v = labels.get(ENABLE_LABEL)
-        return v == "true" if self.label_enable else v != "false"
+        if self.label_enable and v != "true":
+            return f"no {ENABLE_LABEL}=true label"
+        if not self.label_enable and v == "false":
+            return f"label {ENABLE_LABEL}=false"
+        for pat in self.exclude_names:
+            if fnmatch.fnmatchcase(name, pat):
+                return f"name matches UPDOCK_EXCLUDE '{pat}'"
+        image = c["Image"] if not c["Image"].startswith("sha256:") else \
+            self.state.get(name, {}).get("ref", c["Image"])
+        if self.include_images and not any(fnmatch.fnmatchcase(image, p)
+                                           for p in self.include_images):
+            return "image doesn't match UPDOCK_INCLUDE_IMAGES"
+        for pat in self.exclude_images:
+            if fnmatch.fnmatchcase(image, pat):
+                return f"image matches UPDOCK_EXCLUDE_IMAGES '{pat}'"
+        return None
+
+    def eligible(self, c):
+        return self.exclusion(c) is None
+
+    def monitor_only(self, name, labels):
+        """Pinned in the UI or labelled updock.monitor-only: scheduled runs only check."""
+        return bool(self.state.get(name, {}).get("pinned")) or \
+            str((labels or {}).get(MONITOR_ONLY_LABEL, "")).lower() in TRUE
 
     def list(self):
         out = []
@@ -249,9 +287,13 @@ class Updater:
             name = c["Names"][0].lstrip("/")
             st = dict(self.state.get(name, {}))
             ref = st.pop("ref", None) or c["Image"]
+            why = self.exclusion(c)
             row = {"name": name, "image": ref, "image_id": c["ImageID"][7:19],
-                   "state": c["State"], "status": c["Status"],
-                   "eligible": self.eligible(c), "current": self._image_info(c["ImageID"]), **st}
+                   "state": c["State"], "status": c["Status"], "eligible": why is None,
+                   "excluded": why,
+                   "monitor_only": str((c.get("Labels") or {}).get(MONITOR_ONLY_LABEL, "")).lower()
+                   in TRUE,
+                   "current": self._image_info(c["ImageID"]), **st}
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
             for key in ("current", "latest"):
                 if isinstance(row.get(key), dict):
@@ -908,8 +950,9 @@ class Updater:
                 for c in compose_order(self.d.containers(all=self.include_stopped)):
                     if self.eligible(c):
                         name = c["Names"][0].lstrip("/")
-                        if update and self.state.get(name, {}).get("pinned"):
-                            self._log("pinned: checking only", logging.DEBUG, name, "pin")
+                        if update and self.monitor_only(name, c.get("Labels")):
+                            self._log("pinned / monitor-only: checking only", logging.DEBUG,
+                                      name, "pin")
                             self.check_only(name, scheduled=True)
                         elif update:
                             self.update(name, scheduled=True)

@@ -229,6 +229,9 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |
 | `UPDOCK_CLEANUP` | `true` | Delete the superseded image after an update |
 | `UPDOCK_INCLUDE_STOPPED` | `false` | Let scheduled runs update stopped containers too (they stay stopped) |
+| `UPDOCK_EXCLUDE` | empty | Container names to leave alone (globs, comma-separated) |
+| `UPDOCK_INCLUDE_IMAGES` / `UPDOCK_EXCLUDE_IMAGES` | empty | Only / never manage containers whose image matches (globs) |
+| `UPDOCK_SCOPE` | empty | Manage only containers labelled `updock.scope=<this>`; empty = only unscoped ones |
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth. Prefer `UPDOCK_PASSWORD_FILE` (see Secrets) |
@@ -246,6 +249,16 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
 | `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |
+
+### Choosing containers
+
+- Exclude one container: label `updock.enable=false`; or opt in instead with `UPDOCK_LABEL_ENABLE=true` + `updock.enable=true`.
+- `UPDOCK_EXCLUDE`: container names to skip, comma-separated globs (`db-*,backup`).
+- `UPDOCK_INCLUDE_IMAGES` / `UPDOCK_EXCLUDE_IMAGES`: only / never manage containers whose image matches a glob (`ghcr.io/acme/*`, `*:pinned`).
+- `updock.monitor-only=true` label: scheduled runs only check it (same as **Pin**, but declared in Compose).
+- Several Updock instances on one host: give each `UPDOCK_SCOPE=<name>` and label its containers `updock.scope=<name>`. An instance without a scope ignores containers that have one.
+
+The **excluded** badge's tooltip says which rule applies.
 
 Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 
