@@ -1,6 +1,9 @@
 import copy
+import logging
 
 import pytest
+
+from app.logs import LogBuffer
 
 CID = "abcdef1234567890" + "0" * 48
 OLD_IMG = "sha256:old"
@@ -139,3 +142,15 @@ class FakeDocker:
 @pytest.fixture
 def fake():
     return FakeDocker()
+
+
+@pytest.fixture(autouse=True)
+def _updock_logger():
+    lg = logging.getLogger("updock")
+    old = lg.level
+    lg.setLevel(logging.DEBUG)
+    yield
+    lg.setLevel(old)
+    for h in list(lg.handlers):
+        if isinstance(h, LogBuffer):
+            lg.removeHandler(h)

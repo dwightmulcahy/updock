@@ -168,10 +168,10 @@ def test_check_up_to_date_and_available(up, fake):
 def test_check_only_logs_and_errors(up, fake):
     fake.add(make_ctr())
     up.check_only("web")
-    assert up.logs[-1]["msg"] == "web: up to date"
+    assert up.logs[-1]["msg"] == "up to date" and up.logs[-1]["container"] == "web"
     publish_new(fake)
     up.check_only("web")
-    assert up.logs[-1]["msg"] == "web: update available"
+    assert up.logs[-1]["msg"] == "update available"
     fake.fail["pull"] = RuntimeError("net down")
     up.check_only("web")
     assert up.state["web"]["job"] == "error" and up.logs[-1]["level"] == "ERROR"
@@ -187,7 +187,7 @@ def test_check_only_skips_when_locked(up, fake):
 def test_update_noop_when_current(up, fake):
     fake.add(make_ctr())
     up.update("web")
-    assert "create" not in fake.calls and up.logs[-1]["msg"] == "web: up to date"
+    assert "create" not in fake.calls and up.logs[-1]["msg"] == "up to date" and up.logs[-1]["container"] == "web"
 
 
 def test_update_full_flow(up, fake):
@@ -200,14 +200,14 @@ def test_update_full_flow(up, fake):
     assert fake.connected == [("net2", {"Aliases": ["webby"]})]
     assert fake.removed == [OLD_IMG] and OLD_IMG not in fake.images
     assert fake.stop_timeout == 10
-    assert up.logs[-1]["msg"] == "web: updated"
+    assert up.logs[-1]["msg"] == "updated" and up.logs[-1]["event"] == "update"
 
 
 def test_update_force_recreate_no_cleanup_same_image(up, fake):
     fake.add(make_ctr())
     up.update("web", force=True)
     assert "create" in fake.calls and "remove_image" not in fake.calls
-    assert up.logs[-1]["msg"] == "web: recreated"
+    assert up.logs[-1]["msg"] == "recreated"
 
 
 def test_update_force_recreates_when_pull_fails(up, fake):
@@ -308,7 +308,7 @@ def test_run_all(up, fake, monkeypatch):
     up.run_all()
     up.run_all(update=False)
     assert seen == [("u", "web"), ("c", "web")]
-    assert up.logs[-1]["msg"] == "Run finished"
+    assert up.logs[-1]["msg"].startswith("run finished in ")
 
 
 def test_body_image_ref_override():
@@ -464,3 +464,31 @@ def test_deploy_pull_failure(up, fake):
     fake.fail["pull"] = RuntimeError("manifest unknown")
     up.deploy("web", "nope")
     assert up.state["web"]["job"] == "error" and "create" not in fake.calls
+
+
+def test_errors_logged_with_container_event_and_traceback(up, fake):
+    fake.add(make_ctr())
+    fake.fail["pull"] = RuntimeError("registry down")
+    up.check_only("web")
+    e = up.logs[-1]
+    assert e["level"] == "ERROR" and e["container"] == "web" and e["event"] == "error"
+    assert e["msg"] == "RuntimeError: registry down" and "Traceback" in e["exc"]
+
+
+def test_recreate_steps_logged_at_debug(up, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    up.update("web")
+    debug = [e["msg"] for e in up.logs if e["level"] == "DEBUG"]
+    assert "pulling test/app:latest" in debug and "started" in debug
+    assert any(m.startswith("created ") for m in debug)
+    assert any(m == "connected to network net2" for m in debug)
+
+
+def test_expected_docker_errors_logged_without_traceback(up, fake):
+    from app.docker_api import DockerError
+    fake.add(make_ctr())
+    fake.fail["pull"] = DockerError(404, "manifest unknown")
+    up.check_only("web")
+    assert up.logs[-1]["msg"] == "DockerError: 404: manifest unknown"
+    assert "exc" not in up.logs[-1]

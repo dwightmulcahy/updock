@@ -48,6 +48,12 @@ For every container the UI shows the **running** image and, after a check, the *
 
 After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.
 
+## Logging
+
+Every action is logged with its level, container and event type (`check`, `pull`, `update`, `recreate`, `deploy`, `rollback`, `cleanup`, `run`, `error`, …). The **Logs** panel in the UI filters by minimum level, container, event and free text (with highlighting), can pause live updates, expands to full height, and downloads the current view as `.log` or `.json`. Each container row has a **Logs** button that filters to it. Unexpected errors include a collapsible traceback.
+
+The same entries go to stdout (`docker logs updock`) as text or JSON lines.
+
 ## UI / API
 
 | Action | Endpoint |
@@ -60,7 +66,8 @@ After an update to a new image, the superseded image is deleted: any other tags 
 | List registry tags | `GET /api/containers/{name}/tags` |
 | Deploy a specific tag | `POST /api/containers/{name}/deploy?tag=1.2.3` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
-| Logs | `GET /api/logs` |
+| Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
+| Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 
 Webhook example (e.g. from CI after pushing an image):
 ```sh
@@ -77,6 +84,9 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
+| `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
+| `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
+| `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |
 
 Exclude a container: label `updock.enable=false`. Images pinned by digest are skipped. Updock never updates itself.
 

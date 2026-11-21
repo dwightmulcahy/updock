@@ -2,9 +2,11 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 
 from .docker_api import DockerError, split_ref
+from .logs import LogBuffer
+from .registry import RegistryError
 
 ENABLE_LABEL = "updock.enable"
 SELF_LABEL = "updock.self"
@@ -98,20 +100,26 @@ def base_repo(ref):
 
 
 class Updater:
-    def __init__(self, docker, cleanup=True, label_enable=False, registry=None):
+    def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
         self.label_enable = label_enable
         self.state = defaultdict(dict)
         self.locks = defaultdict(threading.Lock)
-        self.logs = deque(maxlen=500)
+        if logbuf is None:
+            logbuf = LogBuffer()
+            log.addHandler(logbuf)
+        self.logbuf = logbuf
         self.self_id = os.getenv("HOSTNAME", "")
         self._img_cache = {}
 
-    def _log(self, msg, level=logging.INFO):
-        log.log(level, msg)
-        self.logs.append({"t": time.time(), "level": logging.getLevelName(level), "msg": msg})
+    @property
+    def logs(self):
+        return self.logbuf.entries
+
+    def _log(self, msg, level=logging.INFO, container=None, event=None, exc_info=None):
+        log.log(level, msg, extra={"container": container, "event": event}, exc_info=exc_info)
 
     def _set(self, name, **kw):
         self.state[name].update(kw)
@@ -151,8 +159,12 @@ class Updater:
             self._set(name, job="pinned", message="Pinned by digest/ID", last_check=time.time())
             return ctr, False
         self._set(name, job="pulling", message=f"Pulling {ref}")
+        self._log(f"pulling {ref}", logging.DEBUG, name, "pull")
+        t0 = time.monotonic()
         self.d.pull(ref)
         new = self.d.image(ref)
+        self._log(f"pulled {ref} in {time.monotonic() - t0:.1f}s -> {new['Id'][7:19]}",
+                  logging.DEBUG, name, "pull")
         self._img_cache[new["Id"]] = latest = image_info(new)
         avail = new["Id"] != ctr["Image"]
         self._set(name, job="update-available" if avail else "up-to-date", latest=latest,
@@ -162,13 +174,15 @@ class Updater:
     def _locked(self, name, fn):
         lock = self.locks[name]
         if not lock.acquire(blocking=False):
-            self._log(f"{name}: job already running", logging.WARNING)
+            self._log("job already running; request ignored", logging.WARNING, name, "busy")
             return
         try:
             fn()
         except Exception as e:
             self._set(name, job="error", message=str(e))
-            self._log(f"{name}: {e}", logging.ERROR)
+            expected = isinstance(e, (DockerError, RegistryError))
+            self._log(f"{type(e).__name__}: {e}", logging.ERROR, name, "error",
+                      exc_info=None if expected else e)
         finally:
             lock.release()
 
@@ -179,23 +193,24 @@ class Updater:
             except Exception as e:
                 if not force:
                     raise
-                self._log(f"{name}: pull failed ({e}); recreating from local image",
-                          logging.WARNING)
+                self._log(f"pull failed ({e}); recreating from local image",
+                          logging.WARNING, name, "pull")
                 ctr, avail = self.d.inspect(name), False
             if not (avail or force):
-                self._log(f"{name}: up to date")
+                self._log("up to date", container=name, event="check")
                 return
             self._set(name, job="updating", message="Recreating")
             self._recreate(ctr, cleanup=True)
             self._set(name, job="updated", update_available=False, last_update=time.time(),
                       message="")
-            self._log(f"{name}: {'updated' if avail else 'recreated'}")
+            self._log("updated" if avail else "recreated", container=name,
+                      event="update" if avail else "recreate")
         self._locked(name, job)
 
     def check_only(self, name):
         def job():
             _, avail = self.check(name)
-            self._log(f"{name}: {'update available' if avail else 'up to date'}")
+            self._log("update available" if avail else "up to date", container=name, event="check")
         self._locked(name, job)
 
     def tags(self, name):
@@ -217,7 +232,7 @@ class Updater:
             self._recreate(ctr, image_ref=new_ref, cleanup=False)
             self._set(name, job="deployed", ref=new_ref, update_available=False,
                       latest=None, last_update=time.time(), message="")
-            self._log(f"{name}: deployed {new_ref}")
+            self._log(f"deployed {new_ref}", container=name, event="deploy")
         self._locked(name, job)
 
     def _recreate(self, ctr, image_ref=None, cleanup=True):
@@ -232,23 +247,31 @@ class Updater:
         was_running = ctr["State"]["Running"]
         timeout = ctr["Config"].get("StopTimeout") or 10
 
+        self._log(f"recreating from {ref} (old image {old_img[7:19]})", container=name,
+                  event="recreate")
         if was_running:
+            self._log(f"stopping (timeout {timeout}s)", logging.DEBUG, name, "recreate")
             self.d.stop(old_id, timeout)
         self.d.rename(old_id, f"{name}-updock-old")
         new_id = None
         try:
             new_id = self.d.create(name, body)
+            self._log(f"created {new_id[:12]}", logging.DEBUG, name, "recreate")
             for net, cfg in extra:
                 self.d.connect(net, new_id, cfg)
+                self._log(f"connected to network {net}", logging.DEBUG, name, "recreate")
             if was_running:
                 self.d.start(new_id)
+                self._log("started", logging.DEBUG, name, "recreate")
         except Exception:
-            self._log(f"{name}: recreate failed, rolling back", logging.ERROR)
+            self._log("recreate failed, rolling back to previous container", logging.ERROR,
+                      name, "rollback")
             if new_id:
                 self.d.remove(new_id)
             self.d.rename(old_id, name)
             if was_running:
                 self.d.start(old_id)
+            self._log("previous container restored", logging.WARNING, name, "rollback")
             raise
         self.d.remove(old_id)
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
@@ -262,13 +285,13 @@ class Updater:
             users = [c["Names"][0].lstrip("/") for c in self.d.containers(all=True)
                      if c["ImageID"] == old_img]
             if users:
-                self._log(f"kept old image {short}: used by {', '.join(users)}")
+                self._log(f"kept old image {short}: used by {', '.join(users)}", event="cleanup")
                 return False
             tags = self.d.image(old_img).get("RepoTags") or []
             repo = base_repo(ref)
             foreign = [t for t in tags if base_repo(t) != repo]
             if foreign:
-                self._log(f"kept old image {short}: also tagged {', '.join(foreign)}")
+                self._log(f"kept old image {short}: also tagged {', '.join(foreign)}", event="cleanup")
                 return False
             for t in tags:
                 self.d.remove_image(t)
@@ -278,16 +301,17 @@ class Updater:
                 if e.status != 404:  # 404: untagging the last tag already removed it
                     raise
             self._img_cache.pop(old_img, None)
-            self._log(f"removed old image {short}")
+            self._log(f"removed old image {short}", event="cleanup")
             return True
         except Exception as e:
-            self._log(f"could not remove old image {short}: {e}", logging.WARNING)
+            self._log(f"could not remove old image {short}: {e}", logging.WARNING, event="cleanup")
             return False
 
     def run_all(self, update=True):
-        self._log("Starting run")
+        t0 = time.monotonic()
+        self._log(f"run started ({'update' if update else 'check only'})", event="run")
         for c in self.d.containers():
             if self.eligible(c):
                 name = c["Names"][0].lstrip("/")
                 (self.update if update else self.check_only)(name)
-        self._log("Run finished")
+        self._log(f"run finished in {time.monotonic() - t0:.1f}s", event="run")
