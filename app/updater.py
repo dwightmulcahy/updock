@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
-from .registry import REVISION_LABELS, VERSION_LABELS, RegistryError
+from .registry import REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryError, parse_repo
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
@@ -67,6 +67,8 @@ def compose_order(containers):
     return out
 
 
+RATE_BASE = 60          # first backoff after a 429, doubled per consecutive 429
+RATE_MAX = 6 * 3600     # longest backoff
 COPY_LABEL = "updock.copy-file"
 COPY_MAX_FILE = 1024 * 1024        # per file
 COPY_MAX_TOTAL = 16 * 1024 * 1024  # all files of one container, held in memory
@@ -197,6 +199,7 @@ class Updater:
         self.hooks = hooks
         self.disk_max, self.disk_warn = disk_max, disk_warn
         self._disk, self._disk_alerted = None, "ok"
+        self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
         self.last_run = {}
@@ -257,14 +260,50 @@ class Updater:
         if split_ref(ref)[1] is None:
             self._set(name, job="pinned-digest", message="Image is pinned by digest/ID", last_check=time.time())
             return ctr, False
+        host = parse_repo(ref)[0]
+        wait = self._backoff_left(host)
+        if wait:
+            raise RateLimited(host, wait, waiting=True)  # don't touch the registry at all
         if self.registry and self.digest_check:
             try:
-                return ctr, self._check_remote(name, ctr, ref)
+                avail = self._check_remote(name, ctr, ref)
+                self._backoff.pop(host, None)
+                return ctr, avail
+            except RateLimited as e:  # no pull fallback: that would spend pull quota too
+                raise self._rate_limited(e)
             except Exception as e:
                 self._log(f"registry digest check failed ({e}); pulling instead",
                           logging.DEBUG, name, "check")
-        avail = self._pull(name, ctr, ref)
+        avail = self._pull_guarded(name, ctr, ref)
         return ctr, avail
+
+    def _backoff_left(self, host):
+        b = self._backoff.get(host)
+        left = (b["until"] - time.time()) if b and "until" in b else 0
+        return int(left) + 1 if left > 0 else 0
+
+    def _rate_limited(self, e):
+        """Record a 429 for e.host and return an exception describing the backoff."""
+        b = self._backoff.setdefault(e.host, {"hits": 0})
+        b["hits"] += 1
+        delay = max(e.retry_after or 0, min(RATE_MAX, RATE_BASE * 2 ** (b["hits"] - 1)))
+        b["until"] = time.time() + delay
+        self._log(f"{e.host} answered 429 Too Many Requests; pausing requests to it for "
+                  f"{format_duration(delay)}", logging.WARNING, event="rate-limit")
+        return RateLimited(e.host, delay)
+
+    def _pull_guarded(self, name, ctr, ref):
+        """_pull, turning Docker's 'toomanyrequests' pull errors into a registry backoff."""
+        host = parse_repo(ref)[0]
+        try:
+            avail = self._pull(name, ctr, ref)
+        except DockerError as e:
+            text = str(e).lower()
+            if "toomanyrequests" in text or "429 too many requests" in text:
+                raise self._rate_limited(RateLimited(host)) from None
+            raise
+        self._backoff.pop(host, None)
+        return avail
 
     def _pull(self, name, ctr, ref):
         self._set(name, job="pulling", message=f"Pulling {ref}")
@@ -329,6 +368,10 @@ class Updater:
             return
         try:
             fn()
+        except RateLimited as e:
+            self.counters["result_rate_limited"] += 1
+            self._set(name, job="rate-limited", message=str(e))
+            self._log(str(e), logging.INFO if e.waiting else logging.WARNING, name, "rate-limit")
         except HookSkip as e:
             self.counters["result_skipped"] += 1
             self._set(name, job="skipped", message=str(e))
@@ -367,7 +410,7 @@ class Updater:
                     self._log(blocked, container=name, event="cooldown")
                     return
             if avail and name in self._unpulled:
-                avail = self._pull(name, ctr, ctr["Config"]["Image"])
+                avail = self._pull_guarded(name, ctr, ctr["Config"]["Image"])
             if not (avail or force):
                 self._log("up to date", container=name, event="check")
                 return

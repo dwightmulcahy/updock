@@ -114,7 +114,7 @@ After an update to a new image, the superseded image is deleted: any other tags 
 
 ## Monitoring
 
-`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
+`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown|rate_limited"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
 
 Probes without auth: `/livez` (process up), `/readyz` (Docker reachable, else 503; used by the image's `HEALTHCHECK`), `/startupz` (scheduler started), plus `/health` (version).
 
@@ -140,6 +140,10 @@ Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks
 | `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,disk` | Also: `deploy` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
+
+## Registry rate limits
+
+When a registry answers `429 Too Many Requests` (or a pull fails with Docker Hub's `toomanyrequests`), Updock pauses **all** requests to that registry: 1 minute, doubling on each further 429 up to 6 hours, or the registry's `Retry-After` if that's longer. Containers on that registry show **rate limited** with the next try time; other registries carry on. A 429 during a digest check never falls back to pulling (which would spend pull quota too). The first successful request clears the backoff. Scheduled runs also start at a random point within `UPDOCK_JITTER` (default `1m`) after their time, so many installations don't all hit registries at exactly 04:00:00.
 
 ## Persistence
 
@@ -187,6 +191,7 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 |---|---|---|
 | `UPDOCK_SCHEDULE` | empty | Cron expression for scheduled runs, e.g. `30 4 * * *` or `@daily` (overrides `UPDOCK_INTERVAL`) |
 | `UPDOCK_INTERVAL` | `86400` | Seconds between scheduled runs when no cron is set; `0` disables the schedule |
+| `UPDOCK_JITTER` | `1m` | Random delay (0 to this) added to each scheduled run; `0` disables |
 | `UPDOCK_WINDOW` | empty | Maintenance window like `02:00-05:00` (may cross midnight): scheduled runs outside it only check |
 | `TZ` | `UTC` | Time zone for the cron expression and window, e.g. `America/Costa_Rica` |
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |

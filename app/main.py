@@ -1,4 +1,5 @@
 import base64
+import random
 import re
 import logging
 import os
@@ -48,6 +49,7 @@ def _tz(name):
 TZ = _tz(os.getenv("TZ", "").strip())
 CRON = Cron(os.environ["UPDOCK_SCHEDULE"]) if os.getenv("UPDOCK_SCHEDULE", "").strip() else None
 WINDOW = Window(os.environ["UPDOCK_WINDOW"]) if os.getenv("UPDOCK_WINDOW", "").strip() else None
+JITTER = parse_duration(os.getenv("UPDOCK_JITTER", "1m"))  # spread runs off the exact minute
 UI_USER = os.getenv("UPDOCK_USER", "admin")
 ENV = load_env()  # UPDOCK_*_FILE -> value (Compose secrets in ./secrets)
 UI_PASS = ENV["UPDOCK_PASSWORD"]
@@ -103,9 +105,10 @@ next_run = {"t": None}
 
 
 def next_due(now_ts):
+    jitter = random.uniform(0, JITTER) if JITTER else 0
     if CRON:
-        return CRON.next(datetime.fromtimestamp(now_ts, TZ)).timestamp()
-    return now_ts + INTERVAL
+        return CRON.next(datetime.fromtimestamp(now_ts, TZ)).timestamp() + jitter
+    return now_ts + INTERVAL + jitter
 
 
 def scheduled_run():
@@ -138,6 +141,7 @@ def scheduler():
 
 def schedule_info():
     return {"cron": str(CRON) if CRON else None, "interval": None if CRON else INTERVAL or None,
+            "jitter": JITTER,
             "window": str(WINDOW) if WINDOW else None, "tz": str(TZ)}
 
 
