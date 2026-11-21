@@ -15,6 +15,9 @@ RUN python -m pip uninstall -y pip setuptools wheel
 # Files owned by root and the root filesystem is read-only at runtime (see compose.yaml).
 # Runs as root only to reach the Docker socket; all capabilities are dropped.
 COPY app ./app
+# State and log history (mount a volume here)
+RUN mkdir -p /data
+ENV UPDOCK_DATA_DIR=/data
 LABEL updock.self="true"
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

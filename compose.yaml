@@ -11,6 +11,7 @@ services:
       - "${HOST_PORT:-8080}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - updock-data:/data
       # Private registries: mount your docker login config
       # - ~/.docker/config.json:/config/config.json:ro
     init: true
@@ -28,3 +29,6 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  updock-data:

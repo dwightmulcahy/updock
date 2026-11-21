@@ -65,6 +65,7 @@ jobs:
         run: |
           docker run -d --name app -p ${PORT}:8080 \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            -v updock-ci-data:/data \
             -e UPDOCK_INTERVAL=0 -e UPDOCK_PASSWORD=ci-secret -e UPDOCK_LOG_LEVEL=DEBUG \
             --read-only --tmpfs /tmp \
             --cap-drop ALL --security-opt no-new-privileges:true \
@@ -120,6 +121,22 @@ jobs:
           # proves the HEAD-digest path ran (not the pull fallback)
           curl -fsS -u admin:ci-secret "$base/api/logs?container=smoke-target&level=DEBUG&q=registry%20digest" \
             | python3 -c "import json,sys; e=json.load(sys.stdin)['entries']; print(e[-1]['msg'] if e else e); sys.exit(0 if e and e[-1]['msg'].endswith('matches') else 1)"
+      - name: State and logs survive a restart
+        run: |
+          set -euo pipefail
+          base="http://localhost:${PORT}"
+          docker restart app >/dev/null
+          for i in $(seq 1 30); do curl -fsS "$base/health" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS -u admin:ci-secret "$base/api/containers" | python3 -c "
+          import json, sys
+          c = next(x for x in json.load(sys.stdin)['containers'] if x['name'] == 'smoke-target')
+          print(c.get('job'), c.get('last_check'))
+          sys.exit(0 if c.get('job') == 'up-to-date' and c.get('last_check') else 1)"
+          curl -fsS -u admin:ci-secret "$base/api/logs?container=smoke-target&event=recreate" | python3 -c "
+          import json, sys
+          e = json.load(sys.stdin)['entries']
+          print(len(e), 'recreate entries from before the restart')
+          sys.exit(0 if e else 1)"
       - name: Scan image for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

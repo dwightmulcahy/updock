@@ -75,6 +75,10 @@ Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
+## Persistence
+
+Container state (last check, latest-image details, rollbacks, failed images, notification markers) and the log history are kept in `/data`, which both Compose files mount as the `updock-data` volume. After a restart the UI shows what it showed before; jobs that were interrupted mid-way are marked as such. Logs rotate at 5 MB (two backups). Without a writable `/data`, Updock still works but forgets everything on restart (and logs a warning).
+
 ## Logging
 
 Every action is logged with its level, container and event type (`check`, `pull`, `update`, `recreate`, `deploy`, `rollback`, `cleanup`, `run`, `error`, …). The **Logs** panel in the UI filters by minimum level, container, event and free text (with highlighting), can pause live updates, expands to full height, and downloads the current view as `.log` or `.json`. Each container row has a **Logs** button that filters to it. Unexpected errors include a collapsible traceback.
@@ -119,6 +123,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
 | `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
+| `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
 | `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |

@@ -104,7 +104,7 @@ def base_repo(ref):
 class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
-                 digest_check=True, notifier=None):
+                 digest_check=True, notifier=None, store=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -122,6 +122,10 @@ class Updater:
         self.sleep, self.clock = sleep, clock
         self.digest_check = digest_check
         self.notifier = notifier or EmailNotifier()  # disabled unless configured
+        self.store = store
+        if store:
+            for name, st in store.load_state().items():
+                self.state[name].update(st)
         self._unpulled = set()  # containers whose newer image was found but not pulled yet
 
     @property
@@ -133,6 +137,8 @@ class Updater:
 
     def _set(self, name, **kw):
         self.state[name].update(kw)
+        if self.store:
+            self.store.save_state({n: dict(st) for n, st in self.state.items()})
 
     def _image_info(self, iid):
         if iid not in self._img_cache:
