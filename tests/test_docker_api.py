@@ -202,3 +202,84 @@ def test_restart(mock_docker):
     s["handler"] = lambda r: httpx.Response(404, text="gone")
     with pytest.raises(DockerError):
         d.restart("id")
+
+
+# ---------- pull progress ----------
+
+def _stream(*msgs):
+    return httpx.Response(200, content=("\n".join(json.dumps(m) for m in msgs) + "\n").encode())
+
+
+def test_pull_reports_progress(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: _stream(
+        {"status": "Pulling from library/x", "id": "latest"},
+        {"status": "Pulling fs layer", "id": "a"},
+        {"status": "Downloading", "id": "a", "progressDetail": {"current": 25, "total": 100}},
+        {"status": "Downloading", "id": "b", "progressDetail": {"current": 0, "total": 100}},
+        {"status": "Downloading", "id": "a", "progressDetail": {"current": 25, "total": 100}},
+        {"status": "Download complete", "id": "a"},
+        {"status": "Downloading", "id": "b", "progressDetail": {"current": 50}},  # no total
+        {"status": "Pull complete", "id": "b"},
+        {"status": "Already exists", "id": "zzz"},
+        {"status": "Digest: sha256:abc"},
+    )
+    seen = []
+    d.pull("x", progress=seen.append)
+    assert seen == [25, 12, 50, 100]
+
+
+def test_pull_progress_zero_total(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: _stream(
+        {"status": "Downloading", "id": "a", "progressDetail": {"current": 0, "total": 0}},
+        {"status": "Downloading", "id": "a", "progressDetail": {"current": 0, "total": 10}})
+    seen = []
+    d.pull("x", progress=seen.append)
+    assert seen == [0]
+
+
+# ---------- credential helpers ----------
+
+def _helper(tmp_path, monkeypatch, name, script):
+    exe = tmp_path / f"docker-credential-{name}"
+    exe.write_text("#!/bin/sh\n" + script)
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+
+
+def test_cred_helpers_per_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    _write_cfg(tmp_path, {})
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    cfg["credHelpers"] = {"ghcr.io": "pass"}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    _helper(tmp_path, monkeypatch, "pass",
+            'read s; echo "{\\"ServerURL\\":\\"$s\\",\\"Username\\":\\"bot\\",\\"Secret\\":\\"tok\\"}"\n')
+    assert docker_api.registry_credentials("ghcr.io/o/app") == ("bot", "tok", "ghcr.io")
+    assert docker_api.registry_credentials("quay.io/o/app") is None
+
+
+def test_creds_store_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"credsStore": "desktop"}))
+    _helper(tmp_path, monkeypatch, "desktop", 'echo \'{"Username":"u","Secret":"s"}\'\n')
+    assert docker_api.registry_credentials("nginx") == ("u", "s", "https://index.docker.io/v1/")
+    assert _decode(registry_auth("nginx"))["password"] == "s"
+
+
+@pytest.mark.parametrize("script", ["exit 1\n", "echo not-json\n", "echo '{\"Username\":\"u\"}'\n"])
+def test_cred_helper_failures(tmp_path, monkeypatch, caplog, script):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"credsStore": "bad"}))
+    _helper(tmp_path, monkeypatch, "bad", script)
+    assert docker_api.registry_credentials("nginx") is None
+    assert "credential helper bad failed" in caplog.records[-1].getMessage()
+
+
+def test_cred_helper_missing(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps({"credsStore": "nothere"}))
+    assert docker_api.registry_credentials("nginx") is None
+    assert "not found on PATH" in caplog.records[-1].getMessage()

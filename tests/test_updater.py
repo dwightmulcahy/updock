@@ -151,7 +151,7 @@ def test_list_sorted_with_state(up, fake):
 def test_check_pinned(up, fake):
     fake.add(make_ctr(image="nginx@sha256:abc"))
     _, avail = up.check("web")
-    assert not avail and up.state["web"]["job"] == "pinned"
+    assert not avail and up.state["web"]["job"] == "pinned-digest"
     assert "pull" not in fake.calls
 
 
@@ -1028,3 +1028,105 @@ def test_non_compose_container_restarts_nothing(up, fake):
     fake.add(make_ctr())
     up.update("web", force=True)
     assert not hasattr(fake, "restarted")
+
+
+# ---------- small additions: progress, stopped, pin, tag info ----------
+
+def _progress_seen(up, monkeypatch):
+    seen = []
+    real = up._set
+
+    def spy(name, **kw):
+        if "progress" in kw:
+            seen.append(kw["progress"])
+        real(name, **kw)
+    monkeypatch.setattr(up, "_set", spy)
+    return seen
+
+
+def test_pull_progress_throttled_by_percent(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    fake.progress_steps = [0, 2, 5, 6, 30, 100]
+    monkeypatch.setattr("app.updater.time.monotonic", lambda: 0.0)  # time never advances
+    seen = _progress_seen(up, monkeypatch)
+    up.check("web")
+    assert seen == [0, 5, 30, 100, None]
+    assert up.state["web"]["progress"] is None
+
+
+def test_pull_progress_throttled_by_time(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    fake.progress_steps = [1, 2, 3]
+    ticks = iter(range(0, 1000, 2))  # every call is 2s later
+    monkeypatch.setattr("app.updater.time.monotonic", lambda: float(next(ticks)))
+    seen = _progress_seen(up, monkeypatch)
+    up.check("web")
+    assert seen == [1, 2, 3, None]
+
+
+def test_list_includes_stopped(up, fake):
+    fake.add(make_ctr())
+    fake.add(make_ctr("off", cid="f" * 64, State={"Running": False}))
+    rows = {r["name"]: r for r in up.list()}
+    assert rows["off"]["state"] == "exited" and rows["web"]["state"] == "running"
+
+
+def test_run_all_skips_stopped_unless_enabled(fake, monkeypatch):
+    fake.add(make_ctr())
+    fake.add(make_ctr("off", cid="f" * 64, State={"Running": False}))
+    for include, expected in ((False, ["web"]), (True, ["web", "off"])):
+        u = Updater(fake, include_stopped=include)
+        seen = []
+        monkeypatch.setattr(u, "update", lambda n, scheduled=False: seen.append(n))
+        u.run_all()
+        assert seen == expected
+
+
+def test_pin_and_scheduled_runs_only_check(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    up.pin("web", True)
+    assert up.state["web"]["pinned"] is True and up.logs[-1]["event"] == "pin"
+    seen = []
+    monkeypatch.setattr(up, "update", lambda n, scheduled=False: seen.append(("u", n)))
+    monkeypatch.setattr(up, "check_only", lambda n, scheduled=False: seen.append(("c", n)))
+    up.run_all()
+    up.pin("web", False)
+    up.run_all()
+    assert seen == [("c", "web"), ("u", "web")]
+    assert "unpinned" in [e for e in up.logs if e["event"] == "pin"][-1]["msg"]
+
+
+def test_pin_unknown_container_raises(up):
+    with pytest.raises(KeyError):
+        up.pin("ghost", True)
+
+
+def test_manual_update_ignores_pin(up, fake):
+    fake.add(make_ctr())
+    up.pin("web", True)
+    publish_new(fake)
+    up.update("web")
+    assert up.state["web"]["job"] == "updated"
+
+
+def test_tag_info(fake):
+    fake.images[OLD_IMG].update(Os="linux", Architecture="amd64")
+    reg = DigestRegistry()
+    u = Updater(fake, registry=reg)
+    fake.add(make_ctr())
+    info = u.tag_info("web", "2.0")
+    assert info["ref"] == "test/app:2.0" and info["version"] == "2.0"
+    assert reg.platforms == [{"os": "linux", "architecture": "amd64", "variant": None}]
+    fake.images.pop(OLD_IMG)
+    u.tag_info("web", "2.0")
+    assert reg.platforms[-1] is None
+    with pytest.raises(RuntimeError):
+        Updater(fake).tag_info("web", "1")
+
+
+def test_deploy_reports_pull_progress(up, fake):
+    fake.add(make_ctr())
+    fake.tags["test/app:1.0"] = OLD_IMG
+    fake.progress_steps = [50, 100]
+    up.deploy("web", "1.0")
+    assert up.state["web"]["progress"] is None and up.state["web"]["job"] == "deployed"

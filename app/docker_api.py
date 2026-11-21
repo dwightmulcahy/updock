@@ -1,6 +1,9 @@
 import base64
 import json
+import logging
 import os
+import shutil
+import subprocess
 from urllib.parse import quote
 
 import httpx
@@ -30,20 +33,48 @@ def registry_of(repo):
     return "https://index.docker.io/v1/"
 
 
+def _cred_helper(helper, server):
+    """Ask a docker-credential-<helper> binary (must be on PATH, e.g. mounted) for creds."""
+    exe = shutil.which(f"docker-credential-{helper}")
+    if not exe:
+        logging.getLogger("updock").warning(
+            "credential helper docker-credential-%s not found on PATH", helper,
+            extra={"event": "auth"})
+        return None
+    try:
+        out = subprocess.run([exe, "get"], input=server, capture_output=True, text=True,
+                             timeout=10, check=True).stdout
+        data = json.loads(out)
+        return data["Username"], data["Secret"]
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError) as e:
+        logging.getLogger("updock").warning("credential helper %s failed for %s: %s", helper,
+                                            server, e, extra={"event": "auth"})
+        return None
+
+
 def registry_credentials(repo):
-    """(user, password, serveraddress) from a mounted docker config.json, or None."""
+    """(user, password, serveraddress) from a mounted docker config.json, or None.
+    Supports inline `auths` entries and `credHelpers` / `credsStore` helpers."""
     path = os.path.join(os.getenv("DOCKER_CONFIG", "/config"), "config.json")
     try:
         with open(path) as f:
-            auths = json.load(f).get("auths", {})
+            cfg = json.load(f)
     except (OSError, ValueError):
         return None
     reg = registry_of(repo)
-    entry = auths.get(reg) or auths.get(reg.replace("https://", "").rstrip("/"))
-    if not entry or "auth" not in entry:
-        return None
-    user, _, pw = base64.b64decode(entry["auth"]).decode().partition(":")
-    return user, pw, reg
+    keys = (reg, reg.replace("https://", "").rstrip("/"))
+    auths = cfg.get("auths", {})
+    entry = auths.get(keys[0]) or auths.get(keys[1])
+    if entry and "auth" in entry:
+        user, _, pw = base64.b64decode(entry["auth"]).decode().partition(":")
+        return user, pw, reg
+    helpers = cfg.get("credHelpers", {})
+    helper = helpers.get(keys[0]) or helpers.get(keys[1]) or cfg.get("credsStore")
+    if helper:
+        creds = _cred_helper(helper, reg)
+        if creds:
+            return creds[0], creds[1], reg
+    return None
 
 
 def registry_auth(repo):
@@ -81,17 +112,38 @@ class Docker:
     def image(self, ref):
         return self._req("GET", f"/images/{quote(ref, safe='')}/json")
 
-    def pull(self, ref):
+    def pull(self, ref, progress=None):
+        """Pull an image. `progress(percent)` is called as layers download (0-100)."""
         repo, tag = split_ref(ref)
         auth = registry_auth(repo)
         headers = {"X-Registry-Auth": auth} if auth else {}
+        layers = {}  # id -> [current, total]
+        last = -1
         with self.c.stream("POST", "/images/create", params={"fromImage": repo, "tag": tag},
                            headers=headers) as r:
             if r.status_code >= 400:
                 raise DockerError(r.status_code, r.read().decode().strip())
             for line in r.iter_lines():
-                if line and "error" in (msg := json.loads(line)):
+                if not line:
+                    continue
+                msg = json.loads(line)
+                if "error" in msg:
                     raise DockerError(500, msg["error"])
+                if progress is None or "id" not in msg:
+                    continue
+                status, detail = msg.get("status", ""), msg.get("progressDetail") or {}
+                if status == "Downloading" and detail.get("total"):
+                    layers[msg["id"]] = [detail.get("current", 0), detail["total"]]
+                elif status in ("Download complete", "Pull complete", "Already exists") \
+                        and msg["id"] in layers:
+                    layers[msg["id"]][0] = layers[msg["id"]][1]
+                else:
+                    continue
+                total = sum(t for _, t in layers.values())
+                pct = int(100 * sum(c for c, _ in layers.values()) / total) if total else 0
+                if pct != last:
+                    last = pct
+                    progress(pct)
 
     def stop(self, cid, t):
         r = self.c.post(f"/containers/{cid}/stop", params={"t": t})

@@ -147,7 +147,7 @@ def base_repo(ref):
 class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
-                 digest_check=True, notifier=None, store=None):
+                 digest_check=True, notifier=None, store=None, include_stopped=False):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -166,6 +166,7 @@ class Updater:
         self.digest_check = digest_check
         self.notifier = notifier or EmailNotifier()  # disabled unless configured
         self.store = store
+        self.include_stopped = include_stopped
         if store:
             for name, st in store.load_state().items():
                 self.state[name].update(st)
@@ -200,7 +201,7 @@ class Updater:
 
     def list(self):
         out = []
-        for c in self.d.containers():
+        for c in self.d.containers(all=True):
             name = c["Names"][0].lstrip("/")
             st = dict(self.state.get(name, {}))
             ref = st.pop("ref", None) or c["Image"]
@@ -215,7 +216,7 @@ class Updater:
         ref = ctr["Config"]["Image"]
         self._set(name, ref=ref)
         if split_ref(ref)[1] is None:
-            self._set(name, job="pinned", message="Pinned by digest/ID", last_check=time.time())
+            self._set(name, job="pinned-digest", message="Image is pinned by digest/ID", last_check=time.time())
             return ctr, False
         if self.registry and self.digest_check:
             try:
@@ -230,7 +231,7 @@ class Updater:
         self._set(name, job="pulling", message=f"Pulling {ref}")
         self._log(f"pulling {ref}", logging.DEBUG, name, "pull")
         t0 = time.monotonic()
-        self.d.pull(ref)
+        self._pull_image(name, ref)
         new = self.d.image(ref)
         self._log(f"pulled {ref} in {time.monotonic() - t0:.1f}s -> {new['Id'][7:19]}",
                   logging.DEBUG, name, "pull")
@@ -240,6 +241,20 @@ class Updater:
         self._set(name, job="update-available" if avail else "up-to-date", latest=latest,
                   update_available=avail, last_check=time.time(), message="")
         return avail
+
+    def _pull_image(self, name, ref):
+        """Pull with progress shown in the UI (state saved at most every 5% / second)."""
+        seen = {"pct": -100, "t": 0.0}
+
+        def progress(pct):
+            now = time.monotonic()
+            if pct == 100 or pct - seen["pct"] >= 5 or now - seen["t"] >= 1:
+                seen.update(pct=pct, t=now)
+                self._set(name, progress=pct, message=f"Pulling {ref} {pct}%")
+        try:
+            self.d.pull(ref, progress=progress)
+        finally:
+            self._set(name, progress=None)
 
     def _check_remote(self, name, ctr, ref):
         """Compare the registry's digest for the tag with the running image's RepoDigests.
@@ -348,6 +363,27 @@ class Updater:
                                               f"({i['id']})" if i.get("id") else "") if x) or "?"
         return f"{ctr['Config']['Image']} {fmt(old)} -> {fmt(new)}"
 
+    def pin(self, name, pinned):
+        """Pinned containers are checked but never updated by scheduled runs."""
+        self.d.inspect(name)  # 404s for unknown containers
+        self._set(name, pinned=bool(pinned))
+        self._log("pinned: scheduled runs will only check it" if pinned else
+                  "unpinned: scheduled runs will update it again", container=name, event="pin")
+
+    def tag_info(self, name, tag):
+        """Registry details (digest, version, created, ID) for one tag of the image."""
+        if not self.registry:
+            raise RuntimeError("registry lookups disabled")
+        ctr = self.d.inspect(name)
+        try:
+            cur = self.d.image(ctr["Image"])
+            platform = {"os": cur.get("Os"), "architecture": cur.get("Architecture"),
+                        "variant": cur.get("Variant")}
+        except Exception:
+            platform = None
+        ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
+        return {"ref": ref, **self.registry.remote_info(ref, platform)}
+
     def tags(self, name):
         if not self.registry:
             raise RuntimeError("registry lookups disabled")
@@ -361,7 +397,7 @@ class Updater:
             ctr = self.d.inspect(name)
             new_ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
             self._set(name, job="pulling", message=f"Pulling {new_ref}")
-            self.d.pull(new_ref)
+            self._pull_image(name, new_ref)
             self._set(name, job="updating", message=f"Deploying {new_ref}")
             # Keep the previous image so switching back is instant.
             self._recreate(ctr, image_ref=new_ref, cleanup=False)
@@ -556,10 +592,13 @@ class Updater:
         t0 = time.monotonic()
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
         with self.notifier.batch():
-            for c in compose_order(self.d.containers()):
+            for c in compose_order(self.d.containers(all=self.include_stopped)):
                 if self.eligible(c):
                     name = c["Names"][0].lstrip("/")
-                    if update:
+                    if update and self.state.get(name, {}).get("pinned"):
+                        self._log("pinned: checking only", logging.DEBUG, name, "pin")
+                        self.check_only(name, scheduled=True)
+                    elif update:
                         self.update(name, scheduled=True)
                     else:
                         self.check_only(name, scheduled=True)
