@@ -255,3 +255,17 @@ def test_security_headers(client, up, monkeypatch):
     monkeypatch.setattr(main, "UI_PASS", "secret")
     r401 = client.get("/api/containers")
     assert r401.status_code == 401 and r401.headers["x-frame-options"] == "DENY"
+
+
+
+def test_notify_endpoints(client, monkeypatch):
+    from unittest.mock import MagicMock
+    n = MagicMock()
+    n.describe.return_value = {"enabled": True, "to": ["a@x"], "events": ["update"], "server": "h:587"}
+    n.to = ["a@x"]
+    monkeypatch.setattr(main, "NOTIFIER", n)
+    assert client.get("/api/notify").json()["enabled"] is True
+    assert client.post("/api/notify/test").json() == {"sent": True, "to": ["a@x"]}
+    n.test.side_effect = OSError("refused")
+    r = client.post("/api/notify/test")
+    assert r.status_code == 502 and "refused" in r.json()["detail"]

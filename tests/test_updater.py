@@ -304,10 +304,10 @@ def test_run_all(up, fake, monkeypatch):
     fake.add(skip)
     seen = []
     monkeypatch.setattr(up, "update", lambda n, scheduled=False: seen.append(("u", n, scheduled)))
-    monkeypatch.setattr(up, "check_only", lambda n: seen.append(("c", n)))
+    monkeypatch.setattr(up, "check_only", lambda n, scheduled=False: seen.append(("c", n, scheduled)))
     up.run_all()
     up.run_all(update=False)
-    assert seen == [("u", "web", True), ("c", "web")]
+    assert seen == [("u", "web", True), ("c", "web", True)]
     assert up.logs[-1]["msg"].startswith("run finished in ")
 
 
@@ -800,3 +800,111 @@ def test_digest_check_disabled(dup, fake):
     fake.add(make_ctr())
     u.check("web")
     assert "pull" in fake.calls
+
+
+
+# ---------- notifications ----------
+
+class RecNotifier:
+    def __init__(self):
+        self.items, self.batches, self._batch = [], [], None
+
+    def notify(self, event, container, msg):
+        (self._batch if self._batch is not None else self.items).append((event, container, msg))
+
+    def batch(self):
+        import contextlib
+
+        @contextlib.contextmanager
+        def cm():
+            self._batch = []
+            yield
+            self.batches.append(self._batch)
+            self._batch = None
+        return cm()
+
+
+@pytest.fixture
+def nup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.images[OLD_IMG]["Config"] = {**IMG_CFG, "Labels": {"org.opencontainers.image.version": "1.0"}}
+    u = Updater(fake, notifier=RecNotifier())
+    return u
+
+
+def test_notify_on_update_with_versions(nup, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    fake.images[NEW_IMG]["Config"] = {**IMG_CFG, "Labels": {"org.opencontainers.image.version": "2.0"}}
+    nup.update("web")
+    assert nup.notifier.items == [("update", "web", "test/app:latest 1.0 (old) -> 2.0 (new)")]
+
+
+def test_no_notify_on_force_recreate_or_up_to_date(nup, fake):
+    fake.add(make_ctr())
+    nup.update("web")
+    nup.update("web", force=True)
+    assert nup.notifier.items == []
+
+
+def test_notify_on_rollback(nup, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    fake.ctrs["web"]["Config"]["StopTimeout"] = 1
+    nup.startup_grace = 0
+    orig = fake.inspect
+
+    def inspect(cid):
+        c = orig(cid)
+        if c["Id"].startswith("new"):
+            c["State"] = {"Running": False, "ExitCode": 9}
+        return c
+    fake.inspect = inspect
+    nup.update("web")
+    assert nup.notifier.items == [("rollback", "web", "update rolled back: new container exited (code 9)")]
+
+
+def test_notify_on_update_error_but_not_check_error(nup, fake):
+    fake.add(make_ctr())
+    fake.fail["pull"] = RuntimeError("down")
+    nup.check_only("web")
+    assert nup.notifier.items == []
+    nup.update("web")
+    assert nup.notifier.items == [("error", "web", "RuntimeError: down")]
+
+
+def test_notify_deploy_and_dependent_failure(nup, fake, monkeypatch):
+    fake.add(make_ctr())
+    add_dependent(fake)
+    fake.tags["test/app:1.0"] = OLD_IMG
+    real = fake.create
+    monkeypatch.setattr(fake, "create", lambda name, body: (_ for _ in ()).throw(
+        RuntimeError("x")) if name == "app" else real(name, body))
+    nup.deploy("web", "1.0")
+    events = [(e, c) for e, c, _ in nup.notifier.items]
+    assert events == [("error", "app"), ("deploy", "web")]
+
+
+def test_available_notified_once_per_image_on_scheduled_checks(nup, fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    nup.check_only("web")  # manual: never notifies
+    nup.check_only("web", scheduled=True)
+    nup.check_only("web", scheduled=True)
+    assert [e for e, _, _ in nup.notifier.items] == ["available"]
+    assert nup.notifier.items[0][2] == "test/app:latest 1.0 (old) -> (new)"
+
+
+def test_describe_change_without_any_info(nup, fake):
+    ctr = make_ctr(image_id="sha256:missing")
+    fake.add(ctr)
+    assert nup._describe_change(ctr) == "test/app:latest ? -> ?"
+
+
+def test_run_all_batches_notifications(nup, fake):
+    fake.add(make_ctr())
+    fake.add(make_ctr("db", cid="d" * 64))
+    publish_new(fake)
+    nup.run_all()
+    assert nup.notifier.items == []
+    assert [[e for e, _, _ in b] for b in nup.notifier.batches] == [["update", "update"]]

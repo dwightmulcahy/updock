@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 from .docker_api import Docker
+from .notify import EmailNotifier
 from .registry import Registry
 from .updater import Updater
 
@@ -29,11 +30,12 @@ UI_PASS = os.getenv("UPDOCK_PASSWORD", "")
 VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
 
+NOTIFIER = EmailNotifier.from_env(os.environ)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
-             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True))
+             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -199,6 +201,20 @@ def deploy(name: str, tag: str):
     if not TAG_RE.match(tag):
         raise HTTPException(400, "invalid tag")
     return bg(up.deploy, name, tag)
+
+
+@app.get("/api/notify")
+def notify_info():
+    return NOTIFIER.describe()
+
+
+@app.post("/api/notify/test")
+def notify_test():
+    try:
+        NOTIFIER.test()
+    except Exception as e:
+        raise HTTPException(502, f"test email failed: {e}")
+    return {"sent": True, "to": NOTIFIER.to}
 
 
 @app.post("/api/check-all")

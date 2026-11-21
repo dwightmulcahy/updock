@@ -59,6 +59,22 @@ For every container the UI shows the **running** image and, after a check, the *
 
 After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.
 
+## Email notifications
+
+Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks, failed updates and (in check-only mode) newly available images. Everything that happens during one scheduled run arrives as a single email; manual actions email immediately. "Update available" is sent once per new image, not every run. Use **Test email** in the header to check the settings; every send (or failure) is in the logs as a `notify` event.
+
+| Var | Default | |
+|---|---|---|
+| `UPDOCK_SMTP_HOST` | empty | SMTP server; empty disables email |
+| `UPDOCK_SMTP_PORT` | `587` | `465` for SSL |
+| `UPDOCK_SMTP_SECURITY` | `starttls` | `starttls`, `ssl` or `none` |
+| `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
+| `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
+| `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available` | Also: `deploy` |
+| `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
+| `UPDOCK_URL` | empty | Link to the UI included in emails |
+
 ## Logging
 
 Every action is logged with its level, container and event type (`check`, `pull`, `update`, `recreate`, `deploy`, `rollback`, `cleanup`, `run`, `error`, …). The **Logs** panel in the UI filters by minimum level, container, event and free text (with highlighting), can pause live updates, expands to full height, and downloads the current view as `.log` or `.json`. Each container row has a **Logs** button that filters to it. Unexpected errors include a collapsible traceback.
@@ -79,6 +95,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
+| Email settings / send test email | `GET /api/notify`, `POST /api/notify/test` |
 
 Webhook example (e.g. from CI after pushing an image):
 ```sh
