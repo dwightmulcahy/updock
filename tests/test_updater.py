@@ -1130,3 +1130,96 @@ def test_deploy_reports_pull_progress(up, fake):
     fake.progress_steps = [50, 100]
     up.deploy("web", "1.0")
     assert up.state["web"]["progress"] is None and up.state["web"]["job"] == "deployed"
+
+
+# ---------- image cooldown ----------
+
+def _iso(age_s):
+    import datetime as dt
+    t = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_s)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+@pytest.fixture
+def cup(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "selfhost")
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"])
+
+    def make(created, cooldown=86400, labels=None):
+        reg = DigestRegistry(info={"id": "new", "digest": "sha256:remote", "tags": [],
+                                   "version": "2.0", "revision": None, "created": created})
+        ctr = make_ctr()
+        if labels:
+            ctr["Config"]["Labels"].update(labels)
+        fake.add(ctr)
+        publish_new(fake)
+        return Updater(fake, registry=reg, cooldown=cooldown)
+    return make
+
+
+def test_cooldown_defers_young_image_without_pulling(cup, fake):
+    u = cup(_iso(3 * 3600 + 30))
+    u.update("web", scheduled=True)
+    st = u.state["web"]
+    assert st["job"] == "cooldown" and "2.0 is 3h old; applying after 1d (in 20h59m)" in st["message"]
+    assert "pull" not in fake.calls and "create" not in fake.calls
+    assert u.logs[-1]["event"] == "cooldown"
+
+
+def test_cooldown_allows_old_enough_image(cup, fake):
+    u = cup(_iso(2 * 86400))
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "updated"
+
+
+@pytest.mark.parametrize("created,reason", [(None, "has no build date"),
+                                            (_iso(-3600), "build date in the future")])
+def test_cooldown_defers_unknown_or_future_dates(cup, fake, created, reason):
+    u = cup(created)
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "cooldown" and reason in u.state["web"]["message"]
+
+
+def test_manual_update_bypasses_cooldown(cup, fake):
+    u = cup(_iso(60))
+    u.update("web")
+    assert u.state["web"]["job"] == "updated"
+
+
+def test_cooldown_label_overrides_and_disables(cup, fake):
+    u = cup(_iso(3600), cooldown=0, labels={"updock.cooldown": "2h"})
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "cooldown"
+    u2 = Updater(fake, registry=u.registry, cooldown=86400)
+    fake.ctrs["web"]["Config"]["Labels"]["updock.cooldown"] = "0"
+    u2.update("web", scheduled=True)
+    assert u2.state["web"]["job"] == "updated"
+
+
+def test_invalid_cooldown_label_warns_once_and_uses_global(cup, fake):
+    u = cup(_iso(60), cooldown=3600, labels={"updock.cooldown": "soon"})
+    ctr = fake.inspect("web")
+    assert u.cooldown_for("web", ctr) == 3600
+    assert u.cooldown_for("web", ctr) == 3600
+    warns = [e for e in u.logs if "invalid updock.cooldown" in e["msg"]]
+    assert len(warns) == 1 and warns[0]["level"] == "WARNING"
+
+
+def test_no_cooldown_by_default(cup, fake):
+    u = cup(None, cooldown=0)
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "updated"
+
+
+def test_cooldown_label_uses_id_when_no_version(fake, monkeypatch):
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"])
+    reg = DigestRegistry(info={"id": "abc123", "digest": "sha256:r", "tags": [], "version": None,
+                               "revision": None, "created": _iso(10)})
+    fake.add(make_ctr())
+    u = Updater(fake, registry=reg, cooldown=3600)
+    u.update("web", scheduled=True)
+    assert u.state["web"]["message"].startswith("cooldown: abc123 is ")
+    reg._info = {"id": None, "digest": "sha256:r", "tags": [], "version": None, "revision": None,
+                 "created": _iso(10)}
+    u.update("web", scheduled=True)
+    assert u.state["web"]["message"].startswith("cooldown: new image is ")
