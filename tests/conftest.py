@@ -81,8 +81,13 @@ class FakeDocker:
 
     def containers(self, all=False):
         self.calls.append(f"containers:{all}")
+        return [e for e in self._entries() if all or e["State"] == "running"]
+
+    def _entries(self):
         return [{"Id": c["Id"], "Names": [f"/{n}"], "Image": c["Config"]["Image"],
-                 "ImageID": c["Image"], "State": "running", "Status": "Up",
+                 "ImageID": c["Image"],
+                 "State": "running" if (c.get("State") or {}).get("Running", True) else "exited",
+                 "Status": "Up",
                  "HostConfig": {"NetworkMode": (c.get("HostConfig") or {}).get("NetworkMode")},
                  "Labels": c["Config"].get("Labels")} for n, c in self.ctrs.items()]
 
@@ -95,9 +100,11 @@ class FakeDocker:
         iid = self.tags.get(ref, ref)
         return {**self.images[iid], "RepoTags": [t for t, i in self.tags.items() if i == iid]}
 
-    def pull(self, ref):
+    def pull(self, ref, progress=None):
         self._maybe_fail("pull")
         self.pulled = ref
+        for pct in getattr(self, "progress_steps", []):
+            progress(pct)
 
     def stop(self, cid, t):
         self._maybe_fail("stop")

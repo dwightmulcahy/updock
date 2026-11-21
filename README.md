@@ -55,7 +55,7 @@ Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the 
 
 For every container the UI shows the **running** image and, after a check, the **latest available** image (read from the registry without pulling it): version label (`org.opencontainers.image.version`, falling back to `org.label-schema.version` / `build_version`), image ID, registry digest, VCS revision, and build date.
 
-**Versions…** lists the tags published for the container's image (Docker Hub, GHCR, Quay, LSCR or any v2 registry; private ones via the mounted `config.json`), newest version first. Deploying a tag recreates the container from `repo:<tag>`, so it stays on that tag; deploy `latest` (or the tag you track) to resume normal updates. The previous image is kept after a version deploy so switching back is instant.
+**Versions…** lists the tags published for the container's image (selecting one shows its version, digest, image ID and build date from the registry) (Docker Hub, GHCR, Quay, LSCR or any v2 registry; private ones via the mounted `config.json`), newest version first. Deploying a tag recreates the container from `repo:<tag>`, so it stays on that tag; deploy `latest` (or the tag you track) to resume normal updates. The previous image is kept after a version deploy so switching back is instant.
 
 ### Old image cleanup
 
@@ -98,6 +98,8 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Recreate even if unchanged | `POST /api/containers/{name}/update?force=true` |
 | List registry tags | `GET /api/containers/{name}/tags` |
 | Deploy a specific tag | `POST /api/containers/{name}/deploy?tag=1.2.3` |
+| Registry details for one tag | `GET /api/containers/{name}/tags/{tag}` |
+| Pin / unpin | `POST /api/containers/{name}/pin?pinned=true\|false` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
@@ -118,6 +120,7 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `TZ` | `UTC` | Time zone for the cron expression and window, e.g. `America/Costa_Rica` |
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |
 | `UPDOCK_CLEANUP` | `true` | Delete the superseded image after an update |
+| `UPDOCK_INCLUDE_STOPPED` | `false` | Let scheduled runs update stopped containers too (they stay stopped) |
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
 | `UPDOCK_RUN_ON_START` | `false` | Run once at startup |
 | `UPDOCK_USER` / `UPDOCK_PASSWORD` | `admin` / empty | Basic auth; empty password disables auth |
@@ -130,9 +133,9 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
 | `UPDOCK_LOG_BUFFER` | `2000` | Entries kept for the UI |
 
-Exclude a container: label `updock.enable=false`. Images pinned by digest are skipped. Updock never updates itself.
+Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 
-Private registries: mount `~/.docker/config.json` to `/config/config.json` (plain `auth` entries only; credential helpers aren't supported).
+Private registries: mount `~/.docker/config.json` to `/config/config.json`. Inline `auths` entries work as-is; for `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`).
 
 ## Development
 

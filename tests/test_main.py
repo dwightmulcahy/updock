@@ -340,3 +340,23 @@ def test_notify_endpoints(client, monkeypatch):
     n.test.side_effect = OSError("refused")
     r = client.post("/api/notify/test")
     assert r.status_code == 502 and "refused" in r.json()["detail"]
+
+
+
+def test_tag_info_endpoint(client, up):
+    up.tag_info.return_value = {"ref": "x:1", "version": "1"}
+    assert client.get("/api/containers/web/tags/1.0").json()["version"] == "1"
+    up.tag_info.assert_called_with("web", "1.0")
+    assert client.get("/api/containers/web/tags/-bad").status_code == 400
+    up.tag_info.side_effect = RuntimeError("manifest unknown")
+    r = client.get("/api/containers/web/tags/9.9")
+    assert r.status_code == 502 and "manifest unknown" in r.json()["detail"]
+
+
+def test_pin_endpoint(client, up):
+    assert client.post("/api/containers/web/pin").json() == {"name": "web", "pinned": True}
+    up.pin.assert_called_with("web", True)
+    client.post("/api/containers/web/pin?pinned=false")
+    up.pin.assert_called_with("web", False)
+    up.pin.side_effect = KeyError("ghost")
+    assert client.post("/api/containers/ghost/pin").status_code == 404

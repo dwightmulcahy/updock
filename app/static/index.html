@@ -50,6 +50,12 @@
   .le summary { color:var(--dim); cursor:pointer; font-size:11px; }
   mark { background:#4f8cff55; color:inherit; border-radius:2px; }
   .deployed { background:#2a1f3d; color:#b48cff; }
+  .pinned-badge { background:#2a2f3d; color:#9fb4ff; }
+  tr.stopped td { opacity:.55; } tr.stopped td:last-child { opacity:1; }
+  .bar { height:4px; background:var(--line); border-radius:2px; margin-top:6px; width:120px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:var(--accent); transition:width .4s; }
+  #vdetail { font-size:12px; color:var(--dim); min-height:3.2em; margin-bottom:10px; line-height:1.5; }
+  #vdetail code { color:var(--text); }
   .img { font-size:12px; color:var(--dim); line-height:1.5; }
   .img .v { color:var(--text); font-size:13px; }
   .newer .v { color:var(--warn); }
@@ -96,6 +102,7 @@
   <b id="vtitle"></b>
   <div class="meta" id="vinfo">Loading tags…</div>
   <select id="vsel" size="10"></select>
+  <div id="vdetail"></div>
   <div class="row">
     <button onclick="vdlg.close()">Cancel</button>
     <button class="primary" id="vdeploy" disabled onclick="deployTag()">Deploy</button>
@@ -125,8 +132,22 @@ async function openVersions(name) {
   if (!r.ok) { info.textContent = d.detail || "Failed to load tags"; return; }
   info.textContent = `${d.image} — ${d.tags.length} tags, current: ${d.current || "pinned"}`;
   sel.innerHTML = d.tags.map(t => `<option value="${esc(t)}"${t === d.current ? " selected" : ""}>${esc(t)}${t === d.current ? "  (current)" : ""}</option>`).join("");
-  sel.onchange = () => btn.disabled = !sel.value;
+  sel.onchange = () => { btn.disabled = !sel.value; showTag(name, sel.value); };
+  if (sel.value) showTag(name, sel.value);
   btn.disabled = !sel.value;
+}
+let tagReq = 0;
+async function showTag(name, tag) {
+  const box = document.getElementById("vdetail"), my = ++tagReq;
+  box.textContent = `Reading ${tag}…`;
+  const r = await fetch(`/api/containers/${encodeURIComponent(name)}/tags/${encodeURIComponent(tag)}`);
+  const d = await r.json().catch(() => ({}));
+  if (my !== tagReq) return;  // a newer selection won
+  box.innerHTML = !r.ok ? esc(d.detail || "Could not read tag details")
+    : [`<b>${esc(d.version || "no version label")}</b>`,
+       [d.id ? `id <code>${esc(d.id)}</code>` : "", d.digest ? `digest <code>${esc(short(d.digest))}</code>` : ""].filter(Boolean).join(" · "),
+       [d.revision ? `rev <code>${esc(d.revision)}</code>` : "", d.created ? `built ${esc(new Date(d.created).toLocaleString())}` : ""].filter(Boolean).join(" · ")
+      ].filter(Boolean).join("<br>");
 }
 async function deployTag() {
   const tag = document.getElementById("vsel").value;
@@ -153,12 +174,14 @@ async function refresh() {
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     document.getElementById("rows").innerHTML = d.containers.map(c => {
       const n = encodeURIComponent(c.name), dis = busy(c.job) || !c.eligible ? "disabled" : "";
-      return `<tr>
-        <td><b>${esc(c.name)}</b>${c.eligible ? "" : ' <span class="badge">excluded</span>'}</td>
+      const pin = c.pinned ? "false" : "true";
+      return `<tr class="${c.state === "running" ? "" : "stopped"}">
+        <td><b>${esc(c.name)}</b>${c.eligible ? "" : ' <span class="badge">excluded</span>'}${c.pinned ? ' <span class="badge pinned-badge" title="Scheduled runs only check this container">pinned</span>' : ""}</td>
         <td><div>${esc(c.image)}</div>${imgCell(c.current)}</td>
         <td>${c.latest ? (c.current && c.latest.id === c.current.id ? '<span class="img">same as running</span>' : imgCell(c.latest, "newer")) : '<span class="img">not checked</span>'}</td>
         <td>${esc(c.status)}</td>
-        <td><span class="badge ${esc(c.job)}">${esc(c.job || "unchecked")}</span>
+        <td><span class="badge ${esc(c.job)}">${esc((c.job || "unchecked").replaceAll("-", " "))}</span>
+            ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
             ${(c.job === "error" || c.job === "rolled-back") && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
         <td>${ago(c.last_check)}</td>
         <td><div class="actions">
@@ -166,6 +189,7 @@ async function refresh() {
           <button ${dis} class="primary" onclick="post('/api/containers/${n}/update')">Update now</button>
           <button ${dis} title="Recreate even if image unchanged" onclick="if(confirm('Recreate ${esc(c.name)}?'))post('/api/containers/${n}/update?force=true')">Recreate</button>
           <button ${dis} title="Deploy a specific (e.g. older) tag" onclick="openVersions('${esc(c.name)}')">Versions…</button>
+          <button ${c.eligible ? "" : "disabled"} title="${c.pinned ? "Let scheduled runs update it again" : "Scheduled runs will only check it"}" onclick="post('/api/containers/${n}/pin?pinned=${pin}')">${c.pinned ? "Unpin" : "Pin"}</button>
           <button title="Show this container's logs" onclick="pickContainer('${esc(c.name)}')">Logs</button>
         </div></td></tr>`;
     }).join("");

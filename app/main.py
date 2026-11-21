@@ -62,7 +62,8 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
-             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE)
+             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
+             include_stopped=env_bool("UPDOCK_INCLUDE_STOPPED", False))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -252,6 +253,25 @@ def tags(name: str):
         return up.tags(name)
     except Exception as e:
         raise HTTPException(502, f"could not list tags: {e}")
+
+
+@app.get("/api/containers/{name}/tags/{tag}")
+def tag_info(name: str, tag: str):
+    if not TAG_RE.match(tag):
+        raise HTTPException(400, "invalid tag")
+    try:
+        return up.tag_info(name, tag)
+    except Exception as e:
+        raise HTTPException(502, f"could not read {tag}: {e}")
+
+
+@app.post("/api/containers/{name}/pin")
+def pin(name: str, pinned: bool = True):
+    try:
+        up.pin(name, pinned)
+    except Exception as e:
+        raise HTTPException(404, str(e))
+    return {"name": name, "pinned": pinned}
 
 
 @app.post("/api/containers/{name}/deploy")
