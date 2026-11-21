@@ -106,7 +106,10 @@ curl -u admin:changeme -X POST http://host:8080/api/containers/myapp/update
 
 | Var | Default | |
 |---|---|---|
-| `UPDOCK_INTERVAL` | `86400` | Seconds between scheduled runs; `0` disables the schedule |
+| `UPDOCK_SCHEDULE` | empty | Cron expression for scheduled runs, e.g. `30 4 * * *` or `@daily` (overrides `UPDOCK_INTERVAL`) |
+| `UPDOCK_INTERVAL` | `86400` | Seconds between scheduled runs when no cron is set; `0` disables the schedule |
+| `UPDOCK_WINDOW` | empty | Maintenance window like `02:00-05:00` (may cross midnight): scheduled runs outside it only check |
+| `TZ` | `UTC` | Time zone for the cron expression and window, e.g. `America/Costa_Rica` |
 | `UPDOCK_AUTO_UPDATE` | `true` | `false` = scheduled runs only check |
 | `UPDOCK_CLEANUP` | `true` | Delete the superseded image after an update |
 | `UPDOCK_LABEL_ENABLE` | `false` | `true` = only containers with label `updock.enable=true` |
