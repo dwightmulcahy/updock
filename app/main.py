@@ -32,7 +32,8 @@ COMMIT = os.getenv("GIT_SHA", "")[:7]
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
-             startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")))
+             startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
+             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

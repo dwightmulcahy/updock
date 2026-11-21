@@ -25,7 +25,7 @@
   .badge { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; background:var(--line); }
   .up-to-date,.updated { background:#173a2b; color:var(--ok); }
   .update-available { background:#3a2e14; color:var(--warn); }
-  .pulling,.updating { background:#14263f; color:var(--accent); }
+  .pulling,.updating,.checking { background:#14263f; color:var(--accent); }
   .error { background:#3d1a1a; color:var(--err); }
   .rolled-back { background:#3d2a14; color:var(--warn); }
   .msg { color:var(--err); font-size:12px; max-width:320px; }
@@ -104,11 +104,11 @@
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ago = t => { if (!t) return "—"; const s = Date.now()/1000 - t;
   return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s/60)}m ago` : s < 86400 ? `${Math.floor(s/3600)}h ago` : `${Math.floor(s/86400)}d ago`; };
-const busy = j => j === "pulling" || j === "updating";
+const busy = j => j === "pulling" || j === "updating" || j === "checking";
 const short = d => d ? d.replace("sha256:", "").slice(0, 12) : "";
 const imgCell = (i, cls = "") => !i ? '<span class="img">—</span>' : `<div class="img ${cls}">
   <div class="v">${esc(i.version || "no version label")}</div>
-  <div>id <code>${esc(i.id)}</code>${i.digest ? ` · digest <code>${esc(short(i.digest))}</code>` : ""}</div>
+  <div>${[i.id ? `id <code>${esc(i.id)}</code>` : "", i.digest ? `digest <code>${esc(short(i.digest))}</code>` : ""].filter(Boolean).join(" · ")}</div>
   ${i.revision ? `<div>rev <code>${esc(i.revision)}</code></div>` : ""}
   ${i.created ? `<div>built ${esc(new Date(i.created).toLocaleDateString())}</div>` : ""}</div>`;
 

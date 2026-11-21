@@ -6,16 +6,13 @@ from collections import defaultdict
 
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
-from .registry import RegistryError
+from .registry import REVISION_LABELS, VERSION_LABELS, RegistryError
 
 ENABLE_LABEL = "updock.enable"
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
                       "Healthcheck", "StopSignal", "OnBuild", "Shell")
 EP_KEEP = ("IPAMConfig", "Links", "Aliases", "DriverOpts")
-VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version",
-                  "build_version", "version")
-REVISION_LABELS = ("org.opencontainers.image.revision", "org.label-schema.vcs-ref")
 
 log = logging.getLogger("updock")
 
@@ -105,7 +102,8 @@ def base_repo(ref):
 
 class Updater:
     def __init__(self, docker, cleanup=True, label_enable=False, registry=None, logbuf=None,
-                 health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic):
+                 health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
+                 digest_check=True):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -121,6 +119,8 @@ class Updater:
         self.health_timeout = health_timeout
         self.startup_grace = startup_grace
         self.sleep, self.clock = sleep, clock
+        self.digest_check = digest_check
+        self._unpulled = set()  # containers whose newer image was found but not pulled yet
 
     @property
     def logs(self):
@@ -166,6 +166,16 @@ class Updater:
         if split_ref(ref)[1] is None:
             self._set(name, job="pinned", message="Pinned by digest/ID", last_check=time.time())
             return ctr, False
+        if self.registry and self.digest_check:
+            try:
+                return ctr, self._check_remote(name, ctr, ref)
+            except Exception as e:
+                self._log(f"registry digest check failed ({e}); pulling instead",
+                          logging.DEBUG, name, "check")
+        avail = self._pull(name, ctr, ref)
+        return ctr, avail
+
+    def _pull(self, name, ctr, ref):
         self._set(name, job="pulling", message=f"Pulling {ref}")
         self._log(f"pulling {ref}", logging.DEBUG, name, "pull")
         t0 = time.monotonic()
@@ -174,10 +184,38 @@ class Updater:
         self._log(f"pulled {ref} in {time.monotonic() - t0:.1f}s -> {new['Id'][7:19]}",
                   logging.DEBUG, name, "pull")
         self._img_cache[new["Id"]] = latest = image_info(new)
+        self._unpulled.discard(name)
         avail = new["Id"] != ctr["Image"]
         self._set(name, job="update-available" if avail else "up-to-date", latest=latest,
                   update_available=avail, last_check=time.time(), message="")
-        return ctr, avail
+        return avail
+
+    def _check_remote(self, name, ctr, ref):
+        """Compare the registry's digest for the tag with the running image's RepoDigests.
+        Costs one HEAD request (not a pull, so no Docker Hub rate-limit hit)."""
+        self._set(name, job="checking", message=f"Checking {ref}")
+        remote = self.registry.digest(ref)
+        local = self.d.image(ctr["Image"])
+        local_digests = {d.split("@", 1)[1] for d in local.get("RepoDigests") or []}
+        if remote in local_digests:
+            latest, avail = image_info(local), False
+        else:
+            platform = {"os": local.get("Os"), "architecture": local.get("Architecture"),
+                        "variant": local.get("Variant")}
+            try:
+                latest = self.registry.remote_info(ref, platform)
+            except Exception as e:
+                self._log(f"could not read remote image details: {e}", logging.DEBUG, name,
+                          "check")
+                latest = {"id": None, "digest": remote, "tags": [], "version": None,
+                          "revision": None, "created": None}
+            avail = True
+            self._unpulled.add(name)
+        self._log(f"registry digest {remote[7:19]} {'differs' if avail else 'matches'}",
+                  logging.DEBUG, name, "check")
+        self._set(name, job="update-available" if avail else "up-to-date", latest=latest,
+                  update_available=avail, last_check=time.time(), message="")
+        return avail
 
     def _locked(self, name, fn):
         lock = self.locks[name]
@@ -207,6 +245,8 @@ class Updater:
                 self._log(f"pull failed ({e}); recreating from local image",
                           logging.WARNING, name, "pull")
                 ctr, avail = self.d.inspect(name), False
+            if avail and name in self._unpulled:
+                avail = self._pull(name, ctr, ctr["Config"]["Image"])
             if not (avail or force):
                 self._log("up to date", container=name, event="check")
                 return

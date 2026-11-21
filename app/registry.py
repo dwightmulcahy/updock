@@ -1,4 +1,5 @@
-"""Minimal OCI distribution (registry v2) client: list tags with token auth."""
+"""Minimal OCI distribution (registry v2) client: tags, manifest digests, image config."""
+import hashlib
 import re
 
 import httpx
@@ -8,6 +9,14 @@ from .docker_api import registry_credentials, split_ref
 HUB_ALIASES = {"docker.io", "index.docker.io", "registry-1.docker.io"}
 MAX_PAGES = 5
 MAX_TAGS = 300
+INDEX_TYPES = ("application/vnd.oci.image.index.v1+json",
+               "application/vnd.docker.distribution.manifest.list.v2+json")
+MANIFEST_TYPES = ("application/vnd.oci.image.manifest.v1+json",
+                  "application/vnd.docker.distribution.manifest.v2+json")
+ACCEPT = ", ".join(INDEX_TYPES + MANIFEST_TYPES)
+VERSION_LABELS = ("org.opencontainers.image.version", "org.label-schema.version",
+                  "build_version", "version")
+REVISION_LABELS = ("org.opencontainers.image.revision", "org.label-schema.vcs-ref")
 
 
 class RegistryError(Exception):
@@ -53,6 +62,7 @@ def sort_tags(tags):
 class Registry:
     def __init__(self, client=None):
         self.c = client or httpx.Client(timeout=20, follow_redirects=True)
+        self._auth = {}  # (host, name) -> request kwargs, refreshed on 401
 
     def _token(self, header, name, repo_ref):
         scheme, p = _challenge(header)
@@ -72,15 +82,25 @@ class Registry:
         tok = data.get("token") or data.get("access_token")
         return {"headers": {"Authorization": f"Bearer {tok}"}}
 
+    def _do(self, method, url, auth, headers=None, **kw):
+        h = {**(headers or {}), **auth.get("headers", {})}
+        return self.c.request(method, url, headers=h, auth=auth.get("auth"), **kw)
+
+    def _send(self, method, url, host, name, ref, **kw):
+        auth = self._auth.get((host, name), {})
+        r = self._do(method, url, auth, **kw)
+        if r.status_code == 401:
+            auth = self._token(r.headers.get("www-authenticate", ""), name, ref) or {}
+            self._auth[(host, name)] = auth
+            r = self._do(method, url, auth, **kw)
+        return r
+
     def tags(self, ref):
         host, name = parse_repo(ref)
         url = f"https://{host}/v2/{name}/tags/list"
-        params, auth, out = {"n": 1000}, {}, []
+        params, out = {"n": 1000}, []
         for _ in range(MAX_PAGES):
-            r = self.c.get(url, params=params, **auth)
-            if r.status_code == 401 and not auth:
-                auth = self._token(r.headers.get("www-authenticate", ""), name, ref) or {}
-                r = self.c.get(url, params=params, **auth)
+            r = self._send("GET", url, host, name, ref, params=params)
             if r.status_code >= 400:
                 raise RegistryError(f"{host}: {r.status_code} listing tags for {name}")
             out += r.json().get("tags") or []
@@ -91,3 +111,55 @@ class Registry:
             url = link if link.startswith("http") else f"https://{host}{link}"
             params = None
         return sort_tags(out)
+
+    def _manifest(self, ref, reference, method="GET"):
+        host, name = parse_repo(ref)
+        r = self._send(method, f"https://{host}/v2/{name}/manifests/{reference}", host, name,
+                       ref, headers={"Accept": ACCEPT})
+        if r.status_code >= 400:
+            raise RegistryError(f"{host}: {r.status_code} for manifest {name}:{reference}")
+        return r
+
+    def digest(self, ref):
+        """Digest the tag currently points to, via HEAD (doesn't count as a pull)."""
+        tag = split_ref(ref)[1]
+        r = self._manifest(ref, tag, "HEAD")
+        dg = r.headers.get("docker-content-digest")
+        if not dg:  # some registries omit it on HEAD
+            r = self._manifest(ref, tag)
+            dg = r.headers.get("docker-content-digest") or \
+                "sha256:" + hashlib.sha256(r.content).hexdigest()
+        return dg
+
+    def remote_info(self, ref, platform=None):
+        """Version/revision/created/ID of the image a tag points to, without pulling.
+        `platform` = {"os", "architecture", "variant"} selects from a multi-arch index."""
+        host, name = parse_repo(ref)
+        r = self._manifest(ref, split_ref(ref)[1])
+        digest = r.headers.get("docker-content-digest")
+        man = r.json()
+        if man.get("mediaType") in INDEX_TYPES or "manifests" in man:
+            want = platform or {"os": "linux", "architecture": "amd64"}
+            entries = [m for m in man["manifests"]
+                       if (m.get("platform") or {}).get("os") == want.get("os")
+                       and (m.get("platform") or {}).get("architecture") == want.get("architecture")]
+            if want.get("variant"):
+                entries = [m for m in entries
+                           if (m.get("platform") or {}).get("variant") == want["variant"]] or entries
+            if not entries:
+                raise RegistryError(f"no {want.get('os')}/{want.get('architecture')} image in {ref}")
+            man = self._manifest(ref, entries[0]["digest"]).json()
+        cfg_digest = man["config"]["digest"]
+        b = self._send("GET", f"https://{host}/v2/{name}/blobs/{cfg_digest}", host, name, ref)
+        if b.status_code >= 400:
+            raise RegistryError(f"{host}: {b.status_code} fetching image config for {name}")
+        cfg = b.json()
+        labels = (cfg.get("config") or {}).get("Labels") or {}
+        return {
+            "id": cfg_digest.split(":")[-1][:12],
+            "digest": digest,
+            "tags": [],
+            "version": next((labels[k] for k in VERSION_LABELS if labels.get(k)), None),
+            "revision": next((labels[k][:12] for k in REVISION_LABELS if labels.get(k)), None),
+            "created": cfg.get("created"),
+        }
