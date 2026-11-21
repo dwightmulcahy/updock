@@ -17,6 +17,7 @@ from .docker_api import Docker
 from .notify import EmailNotifier
 from .registry import Registry
 from .schedule import Cron, Window
+from .store import Store
 from .updater import Updater
 
 from . import logs as logmod
@@ -46,12 +47,22 @@ UI_PASS = os.getenv("UPDOCK_PASSWORD", "")
 VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
 
+def init_store(directory, buf):
+    """Open the data dir; replay saved logs into the buffer and persist new ones."""
+    store = Store.open(directory)
+    if store:
+        buf.load(store.load_logs(buf.entries.maxlen))
+        buf.listeners.append(store.append_log)
+    return store
+
+
+STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
 NOTIFIER = EmailNotifier.from_env(os.environ)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
-             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER)
+             digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

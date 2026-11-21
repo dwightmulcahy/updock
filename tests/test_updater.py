@@ -908,3 +908,17 @@ def test_run_all_batches_notifications(nup, fake):
     nup.run_all()
     assert nup.notifier.items == []
     assert [[e for e, _, _ in b] for b in nup.notifier.batches] == [["update", "update"]]
+
+
+# ---------- persistence ----------
+
+def test_state_persisted_and_restored(fake, tmp_path):
+    from app.store import Store
+    u = Updater(fake, store=Store(str(tmp_path)))
+    fake.add(make_ctr())
+    publish_new(fake)
+    u.check("web")
+    u2 = Updater(fake, store=Store(str(tmp_path)))
+    st = u2.state["web"]
+    assert st["job"] == "update-available" and st["latest"]["id"] == "new" and st["last_check"]
+    assert u2.list()[0]["update_available"] is True

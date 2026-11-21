@@ -1,9 +1,14 @@
 import copy
 import logging
+import os
+import tempfile
 
 import pytest
 
 from app.logs import LogBuffer
+
+# main.py opens UPDOCK_DATA_DIR at import; keep tests out of /data
+os.environ.setdefault("UPDOCK_DATA_DIR", tempfile.mkdtemp(prefix="updock-test-"))
 
 CID = "abcdef1234567890" + "0" * 48
 OLD_IMG = "sha256:old"
