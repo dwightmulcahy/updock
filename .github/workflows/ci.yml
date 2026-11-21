@@ -31,6 +31,34 @@ jobs:
       - run: docker compose -f compose.yaml -f compose.socket-proxy.yaml config --quiet
       - run: docker compose -f compose.qnap.yaml -f compose.socket-proxy.yaml config --quiet
 
+  arm-v7:
+    name: linux/arm/v7 image
+    needs: [pytest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build for 32-bit ARM (Raspberry Pi 2/3, older NAS)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/arm/v7
+          load: true
+          tags: updock:armv7
+          cache-from: type=gha,scope=armv7
+          cache-to: type=gha,mode=max,scope=armv7
+      - name: Starts and serves /livez under emulation
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/arm/v7 updock:armv7 python -c \
+            "import platform, sys; print(platform.machine(), sys.version.split()[0]); assert platform.machine().startswith('armv7')"
+          docker run -d --name armv7 --platform linux/arm/v7 -p 8090:8080 -e UPDOCK_INTERVAL=0 \
+            --read-only --tmpfs /tmp updock:armv7
+          for i in $(seq 1 60); do curl -fsS http://localhost:8090/livez && exit 0; sleep 2; done
+          docker logs armv7; exit 1
+
   pytest:
     name: pytest
     runs-on: ubuntu-latest

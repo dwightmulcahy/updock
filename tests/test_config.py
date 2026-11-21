@@ -103,3 +103,12 @@ def test_socket_proxy_override_removes_socket_from_updock():
     assert doc["networks"]["docker-api"]["internal"] is True
     for k in ("CONTAINERS", "IMAGES", "NETWORKS", "POST"):
         assert proxy["environment"][k] == "1"
+
+
+@pytest.mark.parametrize("path,key", [
+    (".github/workflows/release.yml", "platforms: linux/amd64,linux/arm64,linux/arm/v7"),
+    (".github/workflows/reusable-docker-publish.yml", "platforms: linux/amd64,linux/arm64,linux/arm/v7"),
+    (".github/actions/docker-publish/action.yml", "default: linux/amd64,linux/arm64,linux/arm/v7"),
+])
+def test_images_published_for_arm_v7(path, key):
+    assert key in open(os.path.join(ROOT, path)).read()
