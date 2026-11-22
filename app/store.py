@@ -52,6 +52,8 @@ class Store:
         for st in state.values():
             if st.get("job") in TRANSIENT_JOBS:  # Updock stopped mid-job
                 st["job"], st["message"] = "error", "interrupted by an Updock restart"
+            for k in ("step", "health_until", "progress"):
+                st.pop(k, None)
         return state
 
     def save_state(self, state):

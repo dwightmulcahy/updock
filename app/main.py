@@ -112,6 +112,7 @@ SECURITY_HEADERS = {
         "form-action 'self'"),
 }
 up.on_change = lambda name, st: HUB.publish("state", {"name": name, **st})
+up.on_run = lambda run: HUB.publish("run", {"run": run, "last_run": up.last_run})
 TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 next_run = {"t": None}
 
@@ -282,7 +283,7 @@ def index():
 @app.get("/api/containers")
 def containers():
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
-            "schedule": schedule_info(),
+            "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
             "version": VERSION}
 
 
@@ -432,9 +433,13 @@ def notify_test():
 
 @app.post("/api/check-all")
 def check_all():
+    if up.run:
+        raise HTTPException(409, "a run is already in progress")
     return bg(up.run_all, False)
 
 
 @app.post("/api/update-all")
 def update_all():
+    if up.run:
+        raise HTTPException(409, "a run is already in progress")
     return bg(up.run_all, True)

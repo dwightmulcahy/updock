@@ -216,6 +216,9 @@ class Updater:
         self.revive_stopped = revive_stopped
         self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
+        self.on_run = None     # callback(run status or None) for the UI's run banner
+        self.run = None        # the scheduled/bulk run in progress, if any
+        self.queue = set()     # containers still waiting in that run
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
         self.last_run = {}
         self._bad_labels = set()
@@ -297,6 +300,8 @@ class Updater:
         out = []
         for c in self.d.containers(all=True):
             name = c["Names"][0].lstrip("/")
+            if name.endswith("-updock-old"):
+                continue  # the previous container, kept only until the update succeeds
             st = dict(self.state.get(name, {}))
             ref = st.pop("ref", None) or c["Image"]
             why = self.exclusion(c)
@@ -305,7 +310,8 @@ class Updater:
                    "excluded": why,
                    "monitor_only": str((c.get("Labels") or {}).get(MONITOR_ONLY_LABEL, "")).lower()
                    in TRUE,
-                   "current": self._image_info(c["ImageID"]), **st}
+                   "current": self._image_info(c["ImageID"]), "queued": name in self.queue,
+                   **st}
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
             for key in ("current", "latest"):
                 if isinstance(row.get(key), dict):
@@ -368,7 +374,7 @@ class Updater:
         return avail
 
     def _pull(self, name, ctr, ref):
-        self._set(name, job="pulling", message=f"Pulling {ref}")
+        self._set(name, job="pulling", step="pull", message=f"Pulling {ref}")
         self._log(f"pulling {ref}", logging.DEBUG, name, "pull")
         t0 = time.monotonic()
         self._pull_image(name, ref)
@@ -436,6 +442,7 @@ class Updater:
         if not lock.acquire(blocking=False):
             self._log("job already running; request ignored", logging.WARNING, name, "busy")
             return
+        self.state[name].update(job_started=time.time(), step=None, health_until=None)
         try:
             fn()
         except RegistryAuthError as e:
@@ -466,10 +473,12 @@ class Updater:
             self._log(f"{type(e).__name__}: {e}", logging.ERROR, name, "error",
                       exc_info=None if expected else e)
         finally:
+            self._set(name, step=None, health_until=None)
             lock.release()
 
     def update(self, name, force=False, scheduled=False):
         def job():
+            self.state[name]["action"] = "update"
             try:
                 ctr, avail = self.check(name)
             except Exception as e:
@@ -497,7 +506,8 @@ class Updater:
                           "use Update now to retry", logging.WARNING, name, "update")
                 self._set(name, job="rolled-back")
                 return
-            self._set(name, job="updating", message="Recreating")
+            self._set(name, job="updating", step="pull" if name in self._unpulled else "stop",
+                      message="Recreating")
             change = self._describe_change(ctr)  # before cleanup removes the old image
             revive = avail and not ctr["State"]["Running"] and self.revives(ctr)
             if revive:
@@ -609,6 +619,7 @@ class Updater:
 
     def check_only(self, name, scheduled=False):
         def job():
+            self.state[name]["action"] = "check"
             ctr, avail = self.check(name)
             self._log("update available" if avail else "up to date", container=name, event="check")
             latest = (self.state[name].get("latest") or {})
@@ -676,9 +687,10 @@ class Updater:
     def deploy(self, name, tag):
         """Recreate the container from repo:<tag> (e.g. roll back to an older version)."""
         def job():
+            self.state[name]["action"] = "deploy"
             ctr = self.d.inspect(name)
             new_ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
-            self._set(name, job="pulling", message=f"Pulling {new_ref}")
+            self._set(name, job="pulling", step="pull", message=f"Pulling {new_ref}")
             self._pull_image(name, new_ref)
             self._set(name, job="updating", message=f"Deploying {new_ref}")
             # Keep the previous image so switching back is instant.
@@ -744,10 +756,14 @@ class Updater:
                   event="recreate")
         if orig_running:
             self._log(f"stopping (timeout {timeout}s)", logging.DEBUG, name, "recreate")
+            if not network_parent:
+                self._set(name, step="stop", message=f"Stopping (up to {timeout}s)")
             self.d.stop(old_id, timeout)
         self.d.rename(old_id, f"{name}-updock-old")
         new_id = None
         try:
+            if not network_parent:
+                self._set(name, step="start", message="Starting the new container")
             new_id = self.d.create(name, body)
             self._log(f"created {new_id[:12]}", logging.DEBUG, name, "recreate")
             for net, cfg in extra:
@@ -776,6 +792,7 @@ class Updater:
         for d in deps:
             self._recreate_dependent(d, new_id, dep_running[d["Id"]], name)
         if cleanup and self.cleanup and self.d.inspect(new_id)["Image"] != old_img:
+            self._set(name, step="cleanup", message="Removing the old image")
             self.remove_old_image(old_img, ref)
         return new_id
 
@@ -857,6 +874,9 @@ class Updater:
                       "health")
         limit = self.health_timeout_for(name, info) if has_hc else self.startup_grace
         deadline = self.clock() + limit
+        self._set(name, step="health", health_until=time.time() + limit,
+                  message=f"Waiting up to {limit}s for the healthcheck" if has_hc else
+                  f"Making sure it stays up for {limit}s")
         self._log(f"waiting up to {limit}s for the healthcheck" if has_hc else
                   f"checking it stays up for {limit}s", logging.DEBUG, name, "health")
         restarts = info.get("RestartCount", 0)
@@ -1015,28 +1035,61 @@ class Updater:
             self._disk_alerted = status
         return ok
 
+    def run_status(self):
+        return dict(self.run, results=dict(self.run["results"])) if self.run else None
+
+    def _publish_run(self):
+        if self.on_run:
+            try:
+                self.on_run(self.run_status())
+            except Exception:  # the banner must never break a run
+                pass
+
     def run_all(self, update=True):
+        if self.run:
+            self._log("a run is already in progress; request ignored", logging.WARNING,
+                      event="run")
+            return False
         t0 = time.monotonic()
         self.counters["runs"] += 1
         self._log(f"run started ({'update' if update else 'check only'})", event="run")
+        self.run = {"kind": "update" if update else "check", "total": 0, "done": 0,
+                    "current": None, "started": time.time(), "results": Counter()}
+        self._publish_run()
         try:
             with self.notifier.batch():
                 if update and not self._disk_gate():
                     update = False
-                for c in compose_order(self.d.containers(all=self.include_stopped)):
-                    if self.eligible(c):
-                        name = c["Names"][0].lstrip("/")
-                        if update and self.monitor_only(name, c.get("Labels")):
-                            self._log("pinned / monitor-only: checking only", logging.DEBUG,
-                                      name, "pin")
-                            self.check_only(name, scheduled=True)
-                        elif update:
-                            self.update(name, scheduled=True)
-                        else:
-                            self.check_only(name, scheduled=True)
+                    self.run["kind"] = "check"
+                targets = [c for c in compose_order(self.d.containers(all=self.include_stopped))
+                           if self.eligible(c)]
+                self.queue = {c["Names"][0].lstrip("/") for c in targets}
+                self.run["total"] = len(targets)
+                self._publish_run()
+                for c in targets:
+                    name = c["Names"][0].lstrip("/")
+                    self.queue.discard(name)
+                    self.run["current"] = name
+                    self._publish_run()
+                    if update and self.monitor_only(name, c.get("Labels")):
+                        self._log("pinned / monitor-only: checking only", logging.DEBUG,
+                                  name, "pin")
+                        self.check_only(name, scheduled=True)
+                    elif update:
+                        self.update(name, scheduled=True)
+                    else:
+                        self.check_only(name, scheduled=True)
+                    self.run["done"] += 1
+                    self.run["results"][self.state.get(name, {}).get("job") or "unknown"] += 1
         except Exception:
             self.counters["run_failures"] += 1
             raise
         finally:
-            self.last_run = {"t": time.time(), "duration": time.monotonic() - t0}
+            summary = self.run_status()
+            self.last_run = {"t": time.time(), "duration": time.monotonic() - t0,
+                             "kind": summary["kind"], "total": summary["total"],
+                             "results": summary["results"]}
+            self.run, self.queue = None, set()
+            self._publish_run()
         self._log(f"run finished in {self.last_run['duration']:.1f}s", event="run")
+        return True

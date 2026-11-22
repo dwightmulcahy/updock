@@ -24,6 +24,8 @@ class SyncThread:
 def up(monkeypatch):
     m = MagicMock()
     m.list.return_value = [{"name": "web"}]
+    m.run, m.last_run = None, {}
+    m.run_status.return_value = None
     monkeypatch.setattr(main, "up", m)
     monkeypatch.setattr(main.threading, "Thread", SyncThread)
     monkeypatch.setattr(main, "UI_PASS", "")
@@ -46,7 +48,7 @@ def test_index(client):
 def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
-        "version": main.VERSION, "schedule": main.schedule_info()}
+        "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {}}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -518,3 +520,19 @@ def test_registries_without_registry_client(client, up, logins, monkeypatch):
     up.state, up._backoff = {}, {}
     assert client.post("/api/registries", json={"host": "q.io", "username": "u", "password": "p"}).status_code == 200
     assert client.delete("/api/registries/q.io").status_code == 200
+
+
+
+def test_bulk_runs_refused_while_running(client, up):
+    up.run = {"kind": "check"}
+    for path in ("/api/check-all", "/api/update-all"):
+        r = client.post(path)
+        assert r.status_code == 409 and "already in progress" in r.json()["detail"]
+    up.run_all.assert_not_called()
+
+
+def test_run_events_published(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main.HUB, "publish", lambda kind, data: seen.append((kind, data)))
+    main.up.on_run({"kind": "check", "total": 3})
+    assert seen == [("run", {"run": {"kind": "check", "total": 3}, "last_run": main.up.last_run})]
