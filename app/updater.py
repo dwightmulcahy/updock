@@ -21,6 +21,7 @@ COOLDOWN_LABEL = "updock.cooldown"
 SCOPE_LABEL = "updock.scope"
 MONITOR_ONLY_LABEL = "updock.monitor-only"
 REVIVE_LABEL = "updock.revive"
+HEALTH_TIMEOUT_LABEL = "updock.health-timeout"
 TRUE = {"1", "true", "yes", "on"}
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
@@ -811,16 +812,20 @@ class Updater:
     def _verify(self, cid, name):
         """Wait for the new container to prove itself; raise UnhealthyError to roll back.
 
-        With a healthcheck: wait up to health_timeout for `healthy`. Without one: it must
-        still be running (not crash-looping) after startup_grace seconds."""
+        With a healthcheck: wait up to the health timeout for `healthy`. Docker may report
+        `unhealthy` while a slow app is still starting (its start period/retries ran out)
+        and flip to `healthy` later, so `unhealthy` alone is not final: only the timeout,
+        an exit or a restart loop is. Without a healthcheck: it must still be running
+        after startup_grace seconds."""
         info = self.d.inspect(cid)
         test = (info["Config"].get("Healthcheck") or {}).get("Test") or []
         has_hc = bool(test) and test[0] != "NONE"
-        limit = self.health_timeout if has_hc else self.startup_grace
+        limit = self.health_timeout_for(name, info) if has_hc else self.startup_grace
         deadline = self.clock() + limit
-        self._log("waiting for healthcheck" if has_hc else f"checking it stays up for {limit}s",
-                  logging.DEBUG, name, "health")
+        self._log(f"waiting up to {limit}s for the healthcheck" if has_hc else
+                  f"checking it stays up for {limit}s", logging.DEBUG, name, "health")
         restarts = info.get("RestartCount", 0)
+        last_out, warned = "", False
         while True:
             st = info["State"]
             if not st.get("Running") or st.get("Restarting"):
@@ -829,18 +834,39 @@ class Updater:
                 raise UnhealthyError(f"new container crashed and was restarted "
                                      f"(exit code {st.get('ExitCode')})")
             health = st.get("Health") or {}
-            if has_hc and health.get("Status") == "healthy":
+            status = health.get("Status")
+            if has_hc and status == "healthy":
                 self._log("new container is healthy", container=name, event="health")
                 return
-            if has_hc and health.get("Status") == "unhealthy":
-                out = ((health.get("Log") or [{}])[-1].get("Output") or "").strip()[:300]
-                raise UnhealthyError("new container is unhealthy" + (f": {out}" if out else ""))
+            if has_hc and status == "unhealthy":
+                last_out = ((health.get("Log") or [{}])[-1].get("Output") or "").strip()[:300]
+                if not warned:
+                    warned = True
+                    left = max(0, int(deadline - self.clock()))
+                    self._log(f"healthcheck failing so far; waiting up to {left}s more"
+                              + (f" ({last_out})" if last_out else ""),
+                              logging.INFO, name, "health")
             if self.clock() >= deadline:
                 if has_hc:
-                    raise UnhealthyError(f"new container not healthy after {limit}s")
+                    raise UnhealthyError(
+                        f"new container not healthy after {limit}s"
+                        + (f"; last check: {last_out}" if last_out else "")
+                        + f" (raise {HEALTH_TIMEOUT_LABEL} if it just starts slowly)")
                 return
             self.sleep(min(2, max(0.1, deadline - self.clock())))
             info = self.d.inspect(cid)
+
+    def health_timeout_for(self, name, info):
+        """Per-container label updock.health-timeout (e.g. 5m) overrides UPDOCK_HEALTH_TIMEOUT."""
+        raw = (info["Config"].get("Labels") or {}).get(HEALTH_TIMEOUT_LABEL)
+        if raw is None:
+            return self.health_timeout
+        try:
+            return parse_duration(raw)
+        except ValueError:
+            self._log(f"invalid {HEALTH_TIMEOUT_LABEL}={raw!r}; using {self.health_timeout}s",
+                      logging.WARNING, name, "health")
+            return self.health_timeout
 
     def _restart_compose_dependents(self, ctr):
         """Mimic Compose `depends_on: {restart: true}`: restart services that asked to be
