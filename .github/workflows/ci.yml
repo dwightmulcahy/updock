@@ -91,6 +91,15 @@ jobs:
           tags: ${{ env.IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Pre-pull test images (with retries for registry rate limits)
+        run: |
+          for img in busybox:stable lscr.io/linuxserver/socket-proxy:latest; do
+            for i in 1 2 3 4 5; do
+              docker pull -q "$img" && break
+              [ "$i" = 5 ] && { echo "::error::could not pull $img"; exit 1; }
+              echo "pull of $img failed (attempt $i), retrying in $((i * 10))s"; sleep $((i * 10))
+            done
+          done
       - name: Start hardened container
         run: |
           # secrets as files (chmod 600, owned by the runner user), like ./secrets with Compose
