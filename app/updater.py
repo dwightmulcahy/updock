@@ -748,7 +748,8 @@ class Updater:
             if was_running:
                 self.d.start(new_id)
                 self._log("started", logging.DEBUG, name, "recreate")
-                self._verify(new_id, name)
+                self._verify(new_id, name, was_unhealthy=(
+                    ((ctr["State"].get("Health") or {}).get("Status") == "unhealthy")))
         except Exception as e:
             self._log(f"{e}; rolling back to previous container", logging.ERROR, name, "rollback")
             if new_id:
@@ -826,7 +827,7 @@ class Updater:
         self._log(f"copied {', '.join(p for p, _, _ in files)} into the new container",
                   container=name, event="copy-file")
 
-    def _verify(self, cid, name):
+    def _verify(self, cid, name, was_unhealthy=False):
         """Wait for the new container to prove itself; raise UnhealthyError to roll back.
 
         With a healthcheck: wait up to the health timeout for `healthy`. Docker may report
@@ -837,6 +838,13 @@ class Updater:
         info = self.d.inspect(cid)
         test = (info["Config"].get("Healthcheck") or {}).get("Test") or []
         has_hc = bool(test) and test[0] != "NONE"
+        if has_hc and was_unhealthy:
+            # Rolling back to a container that fails its healthcheck too gains nothing:
+            # judge the new one like a container without a healthcheck instead.
+            has_hc = False
+            self._log("its healthcheck was already failing before the update, so only "
+                      "checking that the new container stays up", logging.WARNING, name,
+                      "health")
         limit = self.health_timeout_for(name, info) if has_hc else self.startup_grace
         deadline = self.clock() + limit
         self._log(f"waiting up to {limit}s for the healthcheck" if has_hc else
