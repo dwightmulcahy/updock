@@ -1982,3 +1982,29 @@ def test_deploy_auth_error(fake):
     u.deploy("web", "2.0")
     assert u.state["web"]["job"] == "auth-required"
     assert "registry-1.docker.io refused access to test/app" in u.state["web"]["message"]
+
+
+
+def test_already_unhealthy_container_judged_by_staying_up(hup, fake, monkeypatch):
+    """If the old container already failed its healthcheck (e.g. a broken check in the
+    image), requiring the new one to pass would only roll back to another broken one."""
+    c = make_ctr()
+    c["State"] = {"Running": True, "Health": {"Status": "unhealthy"}}
+    fake.add(c)
+    publish_new(fake)
+    bad = {"Running": True, "Health": {"Status": "unhealthy", "Log": [{"Output": "refused"}]}}
+    script_new_container(fake, monkeypatch, [bad], HC)
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+    assert any("already failing before the update" in e["msg"] for e in hup.logs)
+    assert hup.clk.t >= 10  # startup grace was applied
+
+
+def test_already_unhealthy_but_new_one_exits_still_rolls_back(hup, fake, monkeypatch):
+    c = make_ctr()
+    c["State"] = {"Running": True, "Health": {"Status": "unhealthy"}}
+    fake.add(c)
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 1}], HC)
+    hup.update("web")
+    assert hup.state["web"]["job"] == "rolled-back"
