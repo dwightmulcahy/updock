@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from app import registry as reg
-from app.registry import Registry, RegistryError, parse_repo, sort_tags
+from app.registry import Registry, RegistryAuthError, RegistryError, parse_repo, sort_tags
 
 
 @pytest.mark.parametrize("ref,expected", [
@@ -112,7 +112,7 @@ def test_tags_basic_challenge(mk, tmp_path):
 
 def test_tags_basic_challenge_without_credentials(mk):
     r, _ = mk(lambda q: httpx.Response(401, headers={"www-authenticate": 'Basic realm="reg"'}))
-    with pytest.raises(RegistryError, match="401"):
+    with pytest.raises(RegistryAuthError, match="reg.local refused access to app"):
         r.tags("reg.local/app")
 
 
@@ -129,7 +129,7 @@ def test_tags_token_request_fails(mk):
             return httpx.Response(403)
         return httpx.Response(401, headers={"www-authenticate": 'Bearer realm="https://r.io/token"'})
     r, _ = mk(h)
-    with pytest.raises(RegistryError, match="token request failed: 403"):
+    with pytest.raises(RegistryAuthError, match="r.io refused access"):
         r.tags("r.io/app")
 
 
@@ -307,3 +307,107 @@ def test_429_from_token_endpoint(mk):
     with pytest.raises(RateLimited) as e:
         r.digest("r.io/app")
     assert e.value.host == "r.io" and e.value.retry_after is None
+
+
+
+# ---------- auth errors & redirects ----------
+
+from app.registry import auth_help  # noqa: E402
+
+
+@pytest.mark.parametrize("host,expect", [
+    ("ghcr.io", "GitHub token with the read:packages scope"),
+    ("registry-1.docker.io", "Docker Hub username and an access token"),
+    ("quay.io", "a username and password/token"),
+])
+def test_auth_help(host, expect):
+    msg = auth_help(host, "o/app")
+    assert msg.startswith(f"{host} refused access to o/app") and expect in msg
+    assert f"docker login {host}" in msg
+
+
+@pytest.mark.parametrize("path", ["manifests/latest", "tags/list"])
+def test_401_after_token_is_auth_error(mk, path):
+    def h(q):
+        if q.url.path == "/token":
+            return httpx.Response(200, json={"token": "anon"})
+        return httpx.Response(401, headers={"www-authenticate": 'Bearer realm="https://ghcr.io/token"'})
+    r, _ = mk(h)
+    with pytest.raises(RegistryAuthError) as e:
+        r.tags("ghcr.io/me/private") if path.startswith("tags") else r.digest("ghcr.io/me/private")
+    assert e.value.host == "ghcr.io" and e.value.name == "me/private"
+
+
+def test_blob_403_is_auth_error(mk):
+    h, _ = registry_server(index=False, blob_status=403)
+    r, _ = mk(h)
+    with pytest.raises(RegistryAuthError):
+        r.remote_info("ghcr.io/o/app:latest")
+
+
+def test_cross_registry_blob_redirect_reauthenticates(mk):
+    """lscr.io serves the manifest but redirects blobs to ghcr.io; the redirect must get
+    its own token instead of arriving without Authorization (the readarr case)."""
+    seen = []
+
+    def h(q):
+        seen.append((q.url.host, q.url.path, q.headers.get("authorization")))
+        if q.url.host == "lscr.io" and "/manifests/" in q.url.path:
+            return httpx.Response(200, headers={"docker-content-digest": "sha256:idx"},
+                                  json={"mediaType": MAN, "config": {"digest": CFG}})
+        if q.url.host == "lscr.io" and "/blobs/" in q.url.path:
+            return httpx.Response(307, headers={"location": f"https://ghcr.io/v2/linuxserver/readarr/blobs/{CFG}"})
+        if q.url.host == "ghcr.io" and q.url.path == "/token":
+            assert q.url.params["scope"] == "repository:linuxserver/readarr:pull"
+            return httpx.Response(200, json={"token": "G"})
+        if q.url.host == "ghcr.io" and "/blobs/" in q.url.path:
+            if q.headers.get("authorization") != "Bearer G":
+                return httpx.Response(401, headers={"www-authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io"'})
+            return httpx.Response(307, headers={"location": "https://pkg-containers.githubusercontent.com/blob?sig=x"})
+        if q.url.host == "pkg-containers.githubusercontent.com":
+            assert q.headers.get("authorization") is None  # never leak tokens to the CDN
+            return httpx.Response(200, json={"created": "2026-11-20T00:00:00Z", "config": {
+                "Labels": {"org.opencontainers.image.version": "0.4.19.2811-ls157"}}})
+        return httpx.Response(404)
+    r, _ = mk(h)
+    info = r.remote_info("lscr.io/linuxserver/readarr:develop")
+    assert info["version"] == "0.4.19.2811-ls157" and info["id"] == "c" * 12
+    assert ("ghcr.io", f"/v2/linuxserver/readarr/blobs/{CFG}", "Bearer G") in seen
+
+
+def test_same_host_redirect_keeps_auth_and_hop_limit(mk):
+    calls = []
+
+    def h(q):
+        calls.append(q.url.path)
+        if q.url.path.endswith("/manifests/latest"):
+            return httpx.Response(302, headers={"location": "/v2/o/app/manifests/latest?x=1"})
+        return httpx.Response(404)
+    r, _ = mk(h)
+    with pytest.raises(RegistryError, match="too many redirects for o/app"):
+        r.digest("ghcr.io/o/app")
+    assert len(calls) == 6  # first try + 5 redirects, then give up
+
+
+
+def test_cdn_redirect_drops_auth_and_params(mk):
+    def h(q):
+        if q.url.host == "ghcr.io":
+            assert q.url.params.get("n") == "1000"
+            return httpx.Response(307, headers={"location": "https://cdn.example/list"})
+        assert "n" not in q.url.params and q.headers.get("authorization") is None
+        return httpx.Response(200, json={"tags": ["1.0"]})
+    r, _ = mk(h)
+    r._auth[("ghcr.io", "o/app")] = {"headers": {"Authorization": "Bearer secret"}}
+    assert r.tags("ghcr.io/o/app") == ["1.0"]
+
+
+def test_token_server_error_is_plain_registry_error(mk):
+    def h(q):
+        if q.url.path == "/token":
+            return httpx.Response(502)
+        return httpx.Response(401, headers={"www-authenticate": 'Bearer realm="https://r.io/token"'})
+    r, _ = mk(h)
+    with pytest.raises(RegistryError, match="token request failed: 502") as e:
+        r.digest("r.io/app")
+    assert not isinstance(e.value, RegistryAuthError)

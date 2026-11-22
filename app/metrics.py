@@ -2,7 +2,7 @@
 import time
 
 RESULTS = ("updated", "recreated", "rolled_back", "failed", "check_failed", "skipped", "cooldown",
-           "rate_limited")
+           "rate_limited", "auth_required")
 
 
 def _esc(v):

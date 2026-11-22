@@ -4,6 +4,7 @@ import re
 import time
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -26,6 +27,26 @@ REVISION_LABELS = ("org.opencontainers.image.revision", "org.label-schema.vcs-re
 
 class RegistryError(Exception):
     pass
+
+
+class RegistryAuthError(RegistryError):
+    """The registry wants credentials Updock doesn't have (private image, or wrong login)."""
+
+    def __init__(self, host, name, status=401):
+        self.host, self.name, self.status = host, name, status
+        super().__init__(auth_help(host, name))
+
+
+def auth_help(host, name):
+    """Actionable explanation for a 401/403 from `host` for repository `name`."""
+    hint = {
+        "ghcr.io": "a GitHub token with the read:packages scope",
+        "registry-1.docker.io": "your Docker Hub username and an access token",
+        "docker.io": "your Docker Hub username and an access token",
+    }.get(host, "a username and password/token for it")
+    return (f"{host} refused access to {name} (private image or missing login). Add a "
+            f"registry login for {host} using {hint}: mount a docker config.json at "
+            f"/config/config.json (docker login {host}).")
 
 
 class RateLimited(RegistryError):
@@ -111,6 +132,8 @@ class Registry:
         if r.status_code == 429:
             raise RateLimited(parse_repo(repo_ref)[0],
                               retry_after_seconds(r.headers.get("retry-after")))
+        if r.status_code in (401, 403):
+            raise RegistryAuthError(parse_repo(repo_ref)[0], name, r.status_code)
         if r.status_code >= 400:
             raise RegistryError(f"token request failed: {r.status_code}")
         data = r.json()
@@ -119,18 +142,42 @@ class Registry:
 
     def _do(self, method, url, auth, headers=None, **kw):
         h = {**(headers or {}), **auth.get("headers", {})}
-        return self.c.request(method, url, headers=h, auth=auth.get("auth"), **kw)
+        return self.c.request(method, url, headers=h, auth=auth.get("auth"),
+                              follow_redirects=False, **kw)
 
-    def _send(self, method, url, host, name, ref, **kw):
+    def _send(self, method, url, host, name, ref, _hops=0, **kw):
         auth = self._auth.get((host, name), {})
         r = self._do(method, url, auth, **kw)
         if r.status_code == 401:
             auth = self._token(r.headers.get("www-authenticate", ""), name, ref) or {}
             self._auth[(host, name)] = auth
             r = self._do(method, url, auth, **kw)
+        if r.is_redirect:
+            if _hops >= 5:
+                raise RegistryError(f"{host}: too many redirects for {name}")
+            return self._redirect(r, method, url, host, name, ref, _hops, **kw)
         if r.status_code == 429:
             raise RateLimited(host, retry_after_seconds(r.headers.get("retry-after")))
         return r
+
+    def _redirect(self, r, method, url, host, name, ref, hops, **kw):
+        """Follow a redirect without leaking or losing credentials.
+
+        Same host: repeat with the same auth. Another registry (e.g. lscr.io sending blobs
+        to ghcr.io): authenticate there through its own challenge, since a plain redirect
+        drops the Authorization header and the target answers 401. Anything else (a CDN
+        or signed storage URL): fetch it without credentials."""
+        target = str(r.url.join(r.headers["location"]))
+        new = urlsplit(target)
+        m = re.match(r"^/v2/(.+)/(manifests|blobs|tags)/", new.path)
+        if new.netloc == host or m:
+            new_host = new.netloc
+            new_name = m[1] if m else name
+            return self._send(method, target, new_host, new_name, ref, _hops=hops + 1, **kw)
+        kw.pop("params", None)
+        return self.c.request(method, target, headers={k: v for k, v in (kw.get("headers") or {}).items()
+                                                        if k.lower() != "authorization"},
+                              follow_redirects=True)
 
     def tags(self, ref):
         host, name = parse_repo(ref)
@@ -138,6 +185,8 @@ class Registry:
         params, out = {"n": 1000}, []
         for _ in range(MAX_PAGES):
             r = self._send("GET", url, host, name, ref, params=params)
+            if r.status_code in (401, 403):
+                raise RegistryAuthError(host, name, r.status_code)
             if r.status_code >= 400:
                 raise RegistryError(f"{host}: {r.status_code} listing tags for {name}")
             out += r.json().get("tags") or []
@@ -153,6 +202,8 @@ class Registry:
         host, name = parse_repo(ref)
         r = self._send(method, f"https://{host}/v2/{name}/manifests/{reference}", host, name,
                        ref, headers={"Accept": ACCEPT})
+        if r.status_code in (401, 403):
+            raise RegistryAuthError(host, name, r.status_code)
         if r.status_code >= 400:
             raise RegistryError(f"{host}: {r.status_code} for manifest {name}:{reference}")
         return r
@@ -188,6 +239,8 @@ class Registry:
             man = self._manifest(ref, entries[0]["digest"]).json()
         cfg_digest = man["config"]["digest"]
         b = self._send("GET", f"https://{host}/v2/{name}/blobs/{cfg_digest}", host, name, ref)
+        if b.status_code in (401, 403):
+            raise RegistryAuthError(host, name, b.status_code)
         if b.status_code >= 400:
             raise RegistryError(f"{host}: {b.status_code} fetching image config for {name}")
         cfg = b.json()

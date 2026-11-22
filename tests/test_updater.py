@@ -844,7 +844,9 @@ def test_remote_info_failure_keeps_digest(dup, fake):
     fake.add(make_ctr())
     u.check("web")
     assert u.state["web"]["latest"] == {"id": None, "digest": "sha256:remote", "tags": [],
-                                        "version": None, "revision": None, "created": None}
+                                        "version": None, "revision": None, "created": None,
+                                        "note": "details unavailable: blob 500"}
+    assert any(e["level"] == "WARNING" and "details couldn't be read" in e["msg"] for e in u.logs)
 
 
 def test_registry_failure_falls_back_to_pull(dup, fake):
@@ -1927,3 +1929,56 @@ def test_invalid_health_timeout_label(hup, fake):
     assert hup.health_timeout_for("web", info) == 60
     assert any("invalid updock.health-timeout" in e["msg"] for e in hup.logs)
     assert hup.health_timeout_for("web", {"Config": {"Labels": None}}) == 60
+
+
+
+# ---------- registry auth ----------
+
+from app.registry import RegistryAuthError as _RAE  # noqa: E402
+
+
+def test_auth_error_no_pull_fallback_and_state(fake):
+    fake.images[OLD_IMG].update(RepoDigests=["test/app@sha256:local"])
+    fake.add(make_ctr(image="ghcr.io/me/private:1"))
+    reg = LimitedRegistry([_RAE("ghcr.io", "me/private")])
+    u = Updater(fake, registry=reg, notifier=RecNotifier())
+    u.update("web")
+    st = u.state["web"]
+    assert st["job"] == "auth-required" and st["auth_host"] == "ghcr.io"
+    assert "read:packages" in st["message"] and "pull" not in fake.calls
+    assert u.counters["result_auth_required"] == 1
+    assert u.notifier.items[0][0] == "error"
+    assert "exc" not in u.logs[-1] and u.logs[-1]["event"] == "auth"
+
+
+def test_auth_error_on_check_does_not_email(fake):
+    fake.add(make_ctr(image="ghcr.io/me/private:1"))
+    u = Updater(fake, registry=LimitedRegistry([_RAE("ghcr.io", "me/private")]), notifier=RecNotifier())
+    u.check_only("web")
+    assert u.state["web"]["job"] == "auth-required" and u.notifier.items == []
+
+
+@pytest.mark.parametrize("msg", [
+    'Head "https://ghcr.io/v2/me/private/manifests/1": unauthorized',
+    "pull access denied for me/private, repository does not exist or may require 'docker login'",
+    "no basic auth credentials", "authentication required",
+])
+def test_engine_pull_auth_errors_explained(fake, msg):
+    from app.docker_api import DockerError
+    fake.add(make_ctr(image="ghcr.io/me/private:1"))
+    u = Updater(fake)
+    fake.fail["pull"] = DockerError(500, msg)
+    u.check_only("web")
+    st = u.state["web"]
+    assert st["job"] == "auth-required"
+    assert st["message"].startswith("ghcr.io refused access to me/private")
+
+
+def test_deploy_auth_error(fake):
+    from app.docker_api import DockerError
+    fake.add(make_ctr())
+    fake.fail["pull"] = DockerError(500, "unauthorized: authentication required")
+    u = Updater(fake)
+    u.deploy("web", "2.0")
+    assert u.state["web"]["job"] == "auth-required"
+    assert "registry-1.docker.io refused access to test/app" in u.state["web"]["message"]
