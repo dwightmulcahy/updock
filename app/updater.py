@@ -633,6 +633,16 @@ class Updater:
     def changelog(info, template=None):
         return changelog_url(info.get("source"), info.get("version"), template)
 
+    def recheck_auth(self, key):
+        """Re-check containers that failed with 'auth required' for registry `key`."""
+        from .docker_api import normalize_registry
+        names = [n for n, st in list(self.state.items())
+                 if st.get("job") == "auth-required"
+                 and normalize_registry(st.get("auth_host")) == key]
+        for n in names:
+            self.check_only(n)
+        return names
+
     def pin(self, name, pinned):
         """Pinned containers are checked but never updated by scheduled runs."""
         self.d.inspect(name)  # 404s for unknown containers

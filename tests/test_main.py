@@ -471,3 +471,50 @@ def test_next_due_jitter(monkeypatch):
     assert main.next_due(0) == 86400 + 30
     monkeypatch.setattr(main, "JITTER", 0)
     assert main.next_due(0) == 86400
+
+
+
+# ---------- registry logins API ----------
+
+@pytest.fixture
+def logins(monkeypatch, tmp_path):
+    from app.logins import RegistryLogins
+    lg = RegistryLogins(str(tmp_path / "r.json"))
+    monkeypatch.setattr(main, "LOGINS", lg)
+    return lg
+
+
+def test_registries_api(client, up, logins):
+    up.state = {"web": {"job": "auth-required", "auth_host": "ghcr.io"}, "db": {"job": "up-to-date"}}
+    up._backoff = {"ghcr.io": {"hits": 2}}
+    r = client.post("/api/registries", json={"host": "https://ghcr.io/", "username": " me ", "password": "tok"})
+    assert r.json() == {"saved": True, "host": "ghcr.io", "rechecking": ["web"]}
+    up.registry.verify_login.assert_called_with("ghcr.io", "me", "tok")
+    up.registry.forget.assert_called_with("ghcr.io")
+    up.recheck_auth.assert_called_with("ghcr.io")
+    assert "ghcr.io" not in up._backoff
+    d = client.get("/api/registries").json()
+    assert d == {"logins": [{"host": "ghcr.io", "username": "me", "persisted": True}], "persisted": True}
+    assert client.delete("/api/registries/ghcr.io").json() == {"removed": "ghcr.io"}
+    assert client.delete("/api/registries/ghcr.io").status_code == 404
+
+
+def test_registries_api_errors(client, up, logins):
+    from app.registry import RegistryAuthError
+    assert client.post("/api/registries", json={"host": "", "username": "u", "password": "p"}).status_code == 400
+    up.registry.verify_login.side_effect = RegistryAuthError("ghcr.io", "x")
+    r = client.post("/api/registries", json={"host": "ghcr.io", "username": "u", "password": "bad"})
+    assert r.status_code == 400 and "rejected" in r.json()["detail"]
+    up.registry.verify_login.side_effect = OSError("no route")
+    r = client.post("/api/registries", json={"host": "docker.io", "username": "u", "password": "p"})
+    assert r.status_code == 502 and "no route" in r.json()["detail"] and "docker.io" in r.json()["detail"]
+    up.state, up._backoff = {}, {}
+    r = client.post("/api/registries?verify=false", json={"host": "docker.io", "username": "u", "password": "p"})
+    assert r.json()["host"] == "docker.io" and logins.get("docker.io") == ("u", "p")
+
+
+def test_registries_without_registry_client(client, up, logins, monkeypatch):
+    up.registry = None
+    up.state, up._backoff = {}, {}
+    assert client.post("/api/registries", json={"host": "q.io", "username": "u", "password": "p"}).status_code == 200
+    assert client.delete("/api/registries/q.io").status_code == 200

@@ -205,6 +205,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 | Image storage vs. limits | `GET /api/disk` |
+| Registry logins (list / add `{host,username,password}` / remove) | `GET`, `POST /api/registries`, `DELETE /api/registries/{host}` |
 | Live events (SSE: `state`, `log`) | `GET /api/events` |
 | Email settings / send test email | `GET /api/notify`, `POST /api/notify/test` |
 
@@ -263,7 +264,7 @@ The **excluded** badge's tooltip says which rule applies.
 
 Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 
-Private registries: mount `~/.docker/config.json` to `/config/config.json`. Inline `auths` entries work as-is; for `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`).
+Private registries: click **Registries** in the header (or **Add login** on a row that says **auth required**) and enter the registry, username and token — for ghcr.io a GitHub token with `read:packages`, for Docker Hub an access token. Updock checks the login with the registry before saving it, stores it in `/data/registries.json` (mode 600, never shown again), uses it for checks and pulls, and immediately re-checks the containers that were refused. Alternatively mount `~/.docker/config.json` to `/config/config.json`; logins saved in the UI take precedence. Inline `auths` entries work as-is; for `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`).
 
 ## Development
 

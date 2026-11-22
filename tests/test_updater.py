@@ -1981,7 +1981,7 @@ def test_deploy_auth_error(fake):
     u = Updater(fake)
     u.deploy("web", "2.0")
     assert u.state["web"]["job"] == "auth-required"
-    assert "registry-1.docker.io refused access to test/app" in u.state["web"]["message"]
+    assert "docker.io refused access to test/app" in u.state["web"]["message"]
 
 
 
@@ -2008,3 +2008,15 @@ def test_already_unhealthy_but_new_one_exits_still_rolls_back(hup, fake, monkeyp
     script_new_container(fake, monkeypatch, [{"Running": False, "ExitCode": 1}], HC)
     hup.update("web")
     assert hup.state["web"]["job"] == "rolled-back"
+
+
+
+def test_recheck_auth_only_matching_host(fake, monkeypatch):
+    u = Updater(fake)
+    u.state["a"].update(job="auth-required", auth_host="ghcr.io")
+    u.state["b"].update(job="auth-required", auth_host="registry-1.docker.io")
+    u.state["c"].update(job="up-to-date")
+    seen = []
+    monkeypatch.setattr(u, "check_only", lambda n, scheduled=False: seen.append(n))
+    assert u.recheck_auth("ghcr.io") == ["a"] and seen == ["a"]
+    assert u.recheck_auth("https://index.docker.io/v1/") == ["b"]

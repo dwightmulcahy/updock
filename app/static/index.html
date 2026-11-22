@@ -65,6 +65,9 @@
   dialog::backdrop { background:#0008; }
   dialog select { width:100%; margin:12px 0; padding:6px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit; }
   dialog .row { display:flex; gap:8px; justify-content:flex-end; }
+  #ldlg input:not([type=checkbox]) { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  #llist .li { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); }
+  #lmsg.err { color:var(--err); } #lmsg.ok { color:var(--ok); }
 </style>
 </head>
 <body>
@@ -72,6 +75,7 @@
   <h1>Updock <span class="meta" id="ver"></span></h1>
   <span class="meta" id="disk" hidden></span>
   <span class="meta" id="next"></span>
+  <button onclick="openLogins()" title="Logins for private registries">Registries</button>
   <button id="testmail" hidden onclick="testEmail()" title="Send a test notification email">Test email</button>
   <button onclick="post('/api/check-all')">Check all</button>
   <button class="primary" onclick="post('/api/update-all')">Update all</button>
@@ -101,6 +105,23 @@
     <div id="logs"></div>
   </section>
 </main>
+<dialog id="ldlg">
+  <b>Registry logins</b>
+  <div class="meta" id="lnote" style="margin:6px 0 10px">Used for checks and pulls of private images. Passwords are never shown again.</div>
+  <div id="llist"></div>
+  <form id="lform" onsubmit="saveLogin(event)" style="display:grid;gap:8px;margin-top:12px">
+    <input id="lhost" placeholder="Registry, e.g. ghcr.io or docker.io" required>
+    <input id="luser" placeholder="Username" required autocomplete="off">
+    <input id="lpass" type="password" placeholder="Password or access token" required autocomplete="new-password">
+    <div class="meta" id="lhint"></div>
+    <label class="meta"><input type="checkbox" id="lnoverify"> Save without checking it first</label>
+    <div class="row">
+      <button type="button" onclick="ldlg.close()">Close</button>
+      <button class="primary" type="submit" id="lsave">Check &amp; save</button>
+    </div>
+    <div class="meta" id="lmsg" role="status"></div>
+  </form>
+</dialog>
 <dialog id="vdlg">
   <b id="vtitle"></b>
   <div class="meta" id="vinfo">Loading tags…</div>
@@ -188,7 +209,8 @@ async function refresh() {
         <td>${esc(c.status)}</td>
         <td><span class="badge ${esc(c.job)}">${esc((c.job || "unchecked").replaceAll("-", " "))}</span>
             ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
-            ${["error", "rolled-back", "cooldown", "skipped", "rate-limited", "auth-required"].includes(c.job) && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}</td>
+            ${["error", "rolled-back", "cooldown", "skipped", "rate-limited", "auth-required"].includes(c.job) && c.message ? `<div class="msg">${esc(c.message)}</div>` : ""}
+            ${c.job === "auth-required" ? `<button class="primary" style="margin-top:6px" onclick="openLogins('${esc(c.auth_host || "")}')">Add login</button>` : ""}</td>
         <td>${ago(c.last_check)}</td>
         <td><div class="actions">
           <button ${dis} onclick="post('/api/containers/${n}/check')">Check</button>
@@ -275,6 +297,45 @@ function downloadLogs(fmt) {
   location.href = "/api/logs/download?" + p;
 }
 
+const HINTS = {"ghcr.io": "GitHub username + a personal access token (classic) with the read:packages scope.",
+               "docker.io": "Docker Hub username + an access token (Account settings → Personal access tokens)."};
+const hubHost = h => ["registry-1.docker.io", "index.docker.io", "docker.io"].includes(h) ? "docker.io" : h;
+async function openLogins(host) {
+  $("lmsg").textContent = ""; $("lmsg").className = "meta"; $("lpass").value = "";
+  if (host) { $("lhost").value = hubHost(host); }
+  $("lhint").textContent = HINTS[hubHost($("lhost").value.trim())] || "";
+  await renderLogins();
+  ldlg.showModal();
+  (host ? $("luser") : $("lhost")).focus();
+}
+$("lhost").addEventListener("input", () => { $("lhint").textContent = HINTS[hubHost($("lhost").value.trim())] || ""; });
+async function renderLogins() {
+  const d = await fetch("/api/registries").then(r => r.json()).catch(() => ({logins: []}));
+  $("llist").innerHTML = d.logins.length ? d.logins.map(l => `<div class="li"><span><b>${esc(l.host)}</b> · ${esc(l.username)}</span>
+      <button onclick="removeLogin('${esc(l.host)}')">Remove</button></div>`).join("")
+    : '<div class="meta">No saved logins.</div>';
+  if (d.persisted === false) $("lnote").textContent = "Logins are kept in memory only (no writable /data): they'll be gone after a restart.";
+}
+async function saveLogin(ev) {
+  ev.preventDefault();
+  const btn = $("lsave"), msg = $("lmsg");
+  btn.disabled = true; msg.className = "meta"; msg.textContent = "Checking the login with the registry…";
+  const r = await fetch("/api/registries" + ($("lnoverify").checked ? "?verify=false" : ""), {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Updock-Request": "1" },
+    body: JSON.stringify({ host: $("lhost").value, username: $("luser").value, password: $("lpass").value })});
+  const d = await r.json().catch(() => ({}));
+  btn.disabled = false;
+  if (!r.ok) { msg.className = "err"; msg.textContent = d.detail || `Failed (${r.status})`; return; }
+  $("lpass").value = "";
+  msg.className = "ok";
+  msg.textContent = `Saved for ${d.host}.` + (d.rechecking.length ? ` Re-checking ${d.rechecking.join(", ")}…` : "");
+  await renderLogins(); setTimeout(refresh, 500);
+}
+async function removeLogin(host) {
+  if (!confirm(`Remove the saved login for ${host}?`)) return;
+  await fetch(`/api/registries/${encodeURIComponent(host)}`, { method: "DELETE", headers: { "X-Updock-Request": "1" } });
+  await renderLogins();
+}
 async function testEmail() {
   const btn = $("testmail"); btn.disabled = true; btn.textContent = "Sending…";
   const r = await fetch("/api/notify/test", { method: "POST", headers: { "X-Updock-Request": "1" } });
