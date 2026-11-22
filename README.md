@@ -48,6 +48,8 @@ Only the proxy mounts the socket (read-only); Updock talks to it over an interna
 | `SYSTEM=1` | disk space guard (`SOCKET_PROXY_SYSTEM=1` in `.env`) |
 | `PING=1` (default) | `/readyz` |
 
+Step-by-step guide, checks and troubleshooting: [docs/socket-proxy.md](docs/socket-proxy.md).
+
 If the proxy blocks a request, the error says which setting to enable (e.g. `blocked by the Docker socket proxy; enable SYSTEM=1`).
 
 Be realistic about what this buys: Updock still needs to create containers, and anything that may create containers can create a privileged one, so the proxy narrows the API surface and keeps the raw socket out of a web-facing container, but it does not make Updock unprivileged.
