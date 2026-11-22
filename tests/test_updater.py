@@ -2020,3 +2020,95 @@ def test_recheck_auth_only_matching_host(fake, monkeypatch):
     monkeypatch.setattr(u, "check_only", lambda n, scheduled=False: seen.append(n))
     assert u.recheck_auth("ghcr.io") == ["a"] and seen == ["a"]
     assert u.recheck_auth("https://index.docker.io/v1/") == ["b"]
+
+
+
+# ---------- run progress & steps ----------
+
+def test_run_progress_published_and_summarised(fake, monkeypatch):
+    u = Updater(fake)
+    fake.add(make_ctr())
+    fake.add(make_ctr("db", cid="d" * 64))
+    events = []
+    u.on_run = lambda r: events.append(None if r is None else dict(r))
+    queued_during = []
+    real = u.check_only
+
+    def spy(n, scheduled=False):
+        queued_during.append((n, sorted(u.queue), [r["name"] for r in u.list() if r["queued"]]))
+        real(n, scheduled)
+    monkeypatch.setattr(u, "check_only", spy)
+    assert u.run_all(update=False) is True
+    assert events[0]["total"] == 0 and events[0]["kind"] == "check"
+    assert any(e and e["total"] == 2 and e["current"] is None for e in events)
+    assert [e["current"] for e in events if e and e["current"]] == ["web", "db"]
+    assert events[-1] is None and u.run is None and u.queue == set()
+    assert queued_during == [("web", ["db"], ["db"]), ("db", [], [])]
+    assert u.last_run["total"] == 2 and u.last_run["results"] == {"up-to-date": 2}
+    assert u.last_run["kind"] == "check"
+
+
+def test_concurrent_run_refused(fake):
+    u = Updater(fake)
+    u.run = {"kind": "check"}
+    assert u.run_all() is False
+    assert any("already in progress" in e["msg"] for e in u.logs)
+
+
+def test_disk_blocked_run_reports_check_kind(fake):
+    fake.disk_usage = lambda: {"used": 10, "reclaimable": 0, "images": 1}
+    u = Updater(fake, disk_max=5)
+    u.run_all()
+    assert u.last_run["kind"] == "check"
+
+
+def test_broken_run_listener_ignored(fake):
+    u = Updater(fake)
+    u.on_run = lambda r: 1 / 0
+    assert u.run_all() is True
+
+
+def test_update_steps_recorded_in_order(hup, fake, monkeypatch):
+    fake.add(make_ctr())
+    publish_new(fake)
+    script_new_container(fake, monkeypatch, [{"Running": True}])
+    steps = []
+    real = hup._set
+
+    def spy(name, **kw):
+        if kw.get("step") and (not steps or steps[-1] != kw["step"]):
+            steps.append(kw["step"])
+        real(name, **kw)
+    monkeypatch.setattr(hup, "_set", spy)
+    hup.update("web")
+    assert steps == ["pull", "stop", "start", "health", "cleanup"]
+    st = hup.state["web"]
+    assert st["step"] is None and st["health_until"] is None and st["job_started"] > 0
+
+
+def test_store_drops_transient_progress(tmp_path):
+    from app.store import Store
+    s = Store(str(tmp_path))
+    s.save_state({"web": {"job": "updated", "step": "health", "health_until": 1, "progress": 40}})
+    assert Store(str(tmp_path)).load_state() == {"web": {"job": "updated"}}
+
+
+
+def test_action_recorded_per_job(fake):
+    u = Updater(fake)
+    fake.add(make_ctr())
+    u.check_only("web")
+    assert u.state["web"]["action"] == "check"
+    u.update("web", force=True)
+    assert u.state["web"]["action"] == "update"
+    fake.tags["test/app:1.0"] = OLD_IMG
+    u.deploy("web", "1.0")
+    assert u.state["web"]["action"] == "deploy"
+
+
+
+def test_list_hides_previous_container_during_update(fake):
+    u = Updater(fake)
+    fake.add(make_ctr())
+    fake.add(make_ctr("web-updock-old", cid="o" * 64))
+    assert [r["name"] for r in u.list()] == ["web"]

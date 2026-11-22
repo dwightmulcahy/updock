@@ -53,6 +53,22 @@
   #menu button:hover:not(:disabled) { background:var(--line); filter:none; }
   #menu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
   .empty { padding:28px; text-align:center; color:var(--dim); }
+  #runbar { display:flex; align-items:center; gap:12px; padding:10px 24px; background:#14203a; border-bottom:1px solid #22345a; font-size:13px; }
+  #runbar[hidden] { display:none; }
+  #runbar.done { background:#13241c; border-color:#1d3b2c; }
+  #runbar.done.bad { background:#2a1a1a; border-color:#4a2626; }
+  #runbar .rb-bar { flex:0 0 220px; height:6px; background:#ffffff14; border-radius:3px; overflow:hidden; }
+  #runbar .rb-bar i { display:block; height:100%; background:var(--accent); transition:width .4s; }
+  #runbar .rb-text { flex:1; } #runbar .rb-cur { color:#9fb4ff; }
+  #runbar .x { background:none; color:var(--dim); padding:2px 8px; }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid #4f8cff55; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation:none; } }
+  .queued { background:#22262f; color:var(--dim); }
+  .steps { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+  .steps span { font-size:11px; padding:1px 6px; border-radius:4px; background:#1b1f27; color:#5d6577; }
+  .steps span.done { color:var(--ok); } .steps span.now { background:#1d2a44; color:#cfe0ff; }
+  .stepmsg { font-size:12px; color:var(--dim); margin-top:4px; }
   @media (max-width: 900px) {
     col.c-chk, th.h-chk, td.t-chk { display:none; }
     col.c-name { width:36%; } col.c-ver { width:24%; } col.c-act { width:150px; }
@@ -120,11 +136,12 @@
   <h1>Updock <span class="meta" id="ver"></span></h1>
   <span class="meta" id="disk" hidden></span>
   <span class="meta" id="next"></span>
-  <button onclick="post('/api/check-all')" title="Check every container for a newer image">Check all</button>
-  <button class="primary" onclick="if(confirm('Update every container that has a newer image?'))post('/api/update-all')">Update all</button>
+  <button id="btn-check-all" onclick="startRun('check')" title="Check every container for a newer image">Check all</button>
+  <button id="btn-update-all" class="primary" onclick="confirm('Update every container that has a newer image?') && startRun('update')">Update all</button>
   <button class="more" onclick="headerMenu(event)" title="More" aria-label="More">⋯</button>
   <button id="testmail" hidden onclick="testEmail()">Test email</button>
 </header>
+<div id="runbar" hidden role="status" aria-live="polite"></div>
 <main>
   <div class="toolbar">
     <input type="search" id="q" placeholder="Search containers or images…" aria-label="Search">
@@ -197,6 +214,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const ago = t => { if (!t) return "—"; const s = Date.now()/1000 - t;
   return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s/60)}m ago` : s < 86400 ? `${Math.floor(s/3600)}h ago` : `${Math.floor(s/86400)}d ago`; };
 const busy = j => j === "pulling" || j === "updating" || j === "checking";
+const mmss = secs => { secs = Math.max(0, Math.floor(secs)); return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; };
 const safeUrl = u => typeof u === "string" && /^https?:\/\//i.test(u);
 const short = d => d ? d.replace("sha256:", "").slice(0, 12) : "";
 const imgCell = (i, cls = "") => !i ? '<span class="img">—</span>' : `<div class="img ${cls}">
@@ -286,15 +304,29 @@ function versionCell(c) {
 }
 function statusText(c) {
   if (!c.eligible) return { badge: "excluded", cls: "", msg: c.excluded, info: true };
+  if (c.queued && !busy(c.job)) return { badge: "queued", cls: "queued" };
   if (c.job === "pulling" && c.progress != null) return { badge: `pulling ${c.progress}%`, cls: "pulling" };
   const job = c.job || (c.pinned || c.monitor_only ? "" : "unchecked");
   const badge = (job || "unchecked").replaceAll("-", " ");
   const show = PROBLEM.has(job) || ["cooldown", "skipped"].includes(job);
   return { badge, cls: job, msg: show ? c.message : "", info: !PROBLEM.has(job) };
 }
+const STEPS = [["pull", "Pull"], ["stop", "Stop"], ["start", "Start"], ["health", "Health check"], ["cleanup", "Clean up"]];
+function progressBlock(c) {
+  if (!busy(c.job)) return "";
+  const since = c.job_started ? `<span data-since="${c.job_started}">${mmss(Date.now() / 1000 - c.job_started)}</span>` : "";
+  if (c.job === "checking" || c.action === "check" || (c.job === "pulling" && !c.step)) {
+    return `<div class="stepmsg"><span class="spin"></span>${esc(c.message || "Checking…")} ${since}</div>`;
+  }
+  const at = STEPS.findIndex(([k]) => k === (c.step || "pull"));
+  const steps = STEPS.map(([k, label], i) => `<span class="${i < at ? "done" : i === at ? "now" : ""}">${i < at ? "✓ " : ""}${label}</span>`).join("");
+  const left = c.step === "health" && c.health_until ? ` · <span data-until="${c.health_until}">${mmss(c.health_until - Date.now() / 1000)}</span> left` : "";
+  return `<div class="steps">${steps}</div><div class="stepmsg"><span class="spin"></span>${esc(c.message || "")}${left} · ${since}</div>`;
+}
 function primaryAction(c) {
   const n = encodeURIComponent(c.name);
   if (busy(c.job)) return `<button disabled>${esc((c.job || "").replace("-", " "))}…</button>`;
+  if (c.queued) return `<button disabled>queued</button>`;
   if (!c.eligible) return "";
   if (c.job === "auth-required") return `<button class="primary" onclick="event.stopPropagation();openLogins('${esc(c.auth_host || "")}')">Add login</button>`;
   if (c.update_available) return `<button class="primary" onclick="event.stopPropagation();post('/api/containers/${n}/update')">Update</button>`;
@@ -355,7 +387,8 @@ function render() {
       <td>${versionCell(c)}</td>
       <td><span class="badge ${esc(st.cls)}">${esc(st.badge)}</span>
           ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
-          ${st.msg ? `<div class="msg ${st.info ? "info" : ""}" title="${esc(st.msg)}">${esc(st.msg)}</div>` : ""}</td>
+          ${progressBlock(c)}
+          ${st.msg && !busy(c.job) ? `<div class="msg ${st.info ? "info" : ""}" title="${esc(st.msg)}">${esc(st.msg)}</div>` : ""}</td>
       <td class="t-chk meta">${ago(c.last_check)}</td>
       <td><div class="actions">${primaryAction(c)}<button class="more" title="More actions" aria-label="More actions for ${esc(c.name)}" onclick="event.stopPropagation();rowMenu(event, this.closest('tr').dataset.name)">⋯</button></div></td>
     </tr>${open ? detailRow(c) : ""}`;
@@ -402,6 +435,54 @@ function headerMenu(ev) {
   ]);
 }
 
+// ---------- run banner ----------
+let RUN = null, LAST = null, hideDone = 0, optimistic = null;
+const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
+  "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
+  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest" };
+function renderRun() {
+  const bar = $("runbar"), active = RUN || optimistic;
+  $("btn-check-all").disabled = $("btn-update-all").disabled = !!active;
+  if (active) {
+    const pct = active.total ? Math.round(100 * active.done / active.total) : 0;
+    const verb = active.kind === "update" ? "Updating" : "Checking";
+    bar.className = ""; bar.hidden = false;
+    bar.innerHTML = `<span class="spin"></span><span class="rb-text">${verb} containers ` +
+      (active.total ? `${active.done + (active.current ? 1 : 0) > active.total ? active.total : active.done + (active.current ? 1 : 0)} of ${active.total}` : "…") +
+      (active.current ? ` · <span class="rb-cur">${esc(active.current)}</span>` : "") +
+      ` · <span data-since="${active.started}">${mmss(Date.now() / 1000 - active.started)}</span></span>` +
+      `<div class="rb-bar"><i style="width:${pct}%"></i></div>`;
+    return;
+  }
+  if (LAST && LAST.t && Date.now() / 1000 - LAST.t < 60 && LAST.t > hideDone) {
+    const r = LAST.results || {}, parts = Object.entries(r).sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${RESULT_WORDS[k] || k.replaceAll("-", " ")}`);
+    const bad = ["error", "rolled-back", "auth-required"].some(k => r[k]);
+    bar.className = "done" + (bad ? " bad" : ""); bar.hidden = false;
+    bar.innerHTML = `<span>${bad ? "⚠" : "✓"}</span><span class="rb-text">${LAST.kind === "update" ? "Update" : "Check"} finished in ${Math.round(LAST.duration)}s` +
+      (LAST.total ? ` · ${LAST.total} containers${parts.length ? ": " + esc(parts.join(", ")) : ""}` : " · nothing to do") +
+      `</span>${bad ? `<button onclick="setFilter('problems')">Show problems</button>` : r["update-available"] ? `<button onclick="setFilter('updates')">Show updates</button>` : ""}` +
+      `<button class="x" title="Dismiss" onclick="hideDone=Date.now()/1000;renderRun()">✕</button>`;
+    return;
+  }
+  bar.hidden = true;
+}
+async function startRun(kind) {
+  optimistic = { kind, total: 0, done: 0, current: null, started: Date.now() / 1000 };
+  renderRun();
+  const r = await fetch(kind === "update" ? "/api/update-all" : "/api/check-all",
+                        { method: "POST", headers: { "X-Updock-Request": "1" } });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); if (r.status !== 409) alert(d.detail || `Failed (${r.status})`); }
+  setTimeout(() => { optimistic = null; renderRun(); }, 1500);
+  setTimeout(refresh, 300);
+}
+setInterval(() => {  // tick timers without re-rendering
+  const now = Date.now() / 1000;
+  document.querySelectorAll("[data-since]").forEach(el => el.textContent = mmss(now - +el.dataset.since));
+  document.querySelectorAll("[data-until]").forEach(el => el.textContent = mmss(+el.dataset.until - now));
+  if (!RUN && LAST && $("runbar").className.startsWith("done") && now - LAST.t >= 60) renderRun();
+}, 1000);
+
 async function refresh() {
   try {
     const r = await fetch("/api/containers"); const d = await r.json();
@@ -413,6 +494,9 @@ async function refresh() {
                 sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     DATA = d.containers;
+    RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;
+    if (RUN) optimistic = null;
+    renderRun();
     if (!$("menu").hidden) { /* keep the open menu's target stable */ } else render();
     await refreshLogs();
   } catch (e) { console.error(e); }
@@ -562,6 +646,11 @@ function connectEvents() {
   const es = new EventSource("/api/events");
   es.onopen = () => { live = true; };
   es.addEventListener("state", () => { tRows = soon(refresh, tRows, 250); });
+  es.addEventListener("run", ev => {
+    try { const d = JSON.parse(ev.data); RUN = d.run; if (d.last_run && d.last_run.t) LAST = d.last_run; } catch (e) {}
+    if (RUN) optimistic = null;
+    renderRun(); tRows = soon(refresh, tRows, 250);
+  });
   es.addEventListener("log", () => { tLogs = soon(() => refreshLogs(), tLogs, 300); });
   es.onerror = () => { live = false; };  // EventSource reconnects by itself
 }

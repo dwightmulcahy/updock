@@ -78,6 +78,8 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 - One row per container: name, state and image; **version** shows running → newer (`2.4.1 → 2.5.0`, ✓ when current; tag or build date when the image has no version label); **status** with the reason when something needs attention.
 - The button does the next useful thing: **Update** when a newer image exists, **Add login** when a registry refused access, otherwise **Check**. Everything else (update now, recreate, versions, pin, logs, release notes) is in the **⋯** menu.
 - Click a row for full details: running and latest image (ID, digest, revision, build date, release notes), last check/update, why it's excluded or pinned, and the full message.
+- **Check all** / **Update all** show a progress banner (`Checking containers 3 of 12 · bazarr · 0:14`) with the remaining containers marked **queued**, then a summary (`Check finished in 14s · 12 containers: 2 update available, 10 up to date`) with a shortcut to the problems or updates. Only one run at a time.
+- An update shows its steps live — Pull (with download %), Stop, Start, Health check (with time left), Clean up — and how long it has been running.
 - Search by name or image, filter (**Updates**, **Problems**, **Running**, **Stopped**, **Excluded**, with counts) and sort (needs attention first, name, last checked, recently updated); the choice is remembered. Narrow screens drop the "checked" column.
 
 ## How it works
