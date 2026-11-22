@@ -12,7 +12,8 @@ from .changelog import TEMPLATE_LABEL, changelog_url, source_of
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
-from .registry import REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryError, parse_repo
+from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
+                       RegistryError, parse_repo)
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
@@ -330,6 +331,8 @@ class Updater:
                 return ctr, avail
             except RateLimited as e:  # no pull fallback: that would spend pull quota too
                 raise self._rate_limited(e)
+            except RegistryAuthError:  # a pull would be refused the same way
+                raise
             except Exception as e:
                 self._log(f"registry digest check failed ({e}); pulling instead",
                           logging.DEBUG, name, "check")
@@ -390,6 +393,13 @@ class Updater:
                 self._set(name, progress=pct, message=f"Pulling {ref} {pct}%")
         try:
             self.d.pull(ref, progress=progress)
+        except DockerError as e:
+            text = str(e).lower()
+            if any(k in text for k in ("unauthorized", "denied", "authentication required",
+                                       "no basic auth credentials")):
+                host, repo = parse_repo(ref)
+                raise RegistryAuthError(host, repo) from None
+            raise
         finally:
             self._set(name, progress=None)
 
@@ -408,10 +418,11 @@ class Updater:
             try:
                 latest = self.registry.remote_info(ref, platform)
             except Exception as e:
-                self._log(f"could not read remote image details: {e}", logging.DEBUG, name,
-                          "check")
+                self._log(f"newer image found, but its details couldn't be read: {e}",
+                          logging.WARNING, name, "check")
                 latest = {"id": None, "digest": remote, "tags": [], "version": None,
-                          "revision": None, "created": None}
+                          "revision": None, "created": None,
+                          "note": f"details unavailable: {e}"}
             avail = True
             self._unpulled.add(name)
         self._log(f"registry digest {remote[7:19]} {'differs' if avail else 'matches'}",
@@ -427,6 +438,12 @@ class Updater:
             return
         try:
             fn()
+        except RegistryAuthError as e:
+            self.counters["result_auth_required"] += 1
+            self._set(name, job="auth-required", message=str(e), auth_host=e.host)
+            self._log(str(e), logging.WARNING, name, "auth")
+            if notify_errors:
+                self.notifier.notify("error", name, str(e))
         except RateLimited as e:
             self.counters["result_rate_limited"] += 1
             self._set(name, job="rate-limited", message=str(e))
