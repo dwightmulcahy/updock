@@ -709,8 +709,9 @@ def test_healthcheck_becomes_healthy(hup, fake, monkeypatch):
     ([{"Running": True}, {"Running": True, "ExitCode": 1, "RestartCount": 1}], None,
      "crashed and was restarted (exit code 1)"),
     ([{"Running": True, "Health": {"Status": "unhealthy", "Log": [{"Output": " db refused \n"}]}}],
-     HC, "unhealthy: db refused"),
-    ([{"Running": True, "Health": {"Status": "unhealthy", "Log": []}}], HC, "is unhealthy"),
+     HC, "not healthy after 60s; last check: db refused (raise updock.health-timeout"),
+    ([{"Running": True, "Health": {"Status": "unhealthy", "Log": []}}], HC,
+     "not healthy after 60s (raise updock.health-timeout"),
     ([{"Running": True, "Health": {"Status": "starting"}}], HC, "not healthy after 60s"),
 ])
 def test_unhealthy_rolls_back(hup, fake, monkeypatch, states, hc, reason):
@@ -1884,3 +1885,45 @@ def test_revive_failure_rolls_back_to_stopped_original(fake):
     assert fake.ctrs["web"]["Id"] == CID and u.state["web"]["job"] == "error"
     assert fake.calls.count("start") == 1  # only the failed revive; the original stays stopped
     assert "stop" not in fake.calls
+
+
+
+# ---------- slow starters: unhealthy is not final ----------
+
+def test_unhealthy_then_healthy_is_success(hup, fake, monkeypatch):
+    """Docker flips to `unhealthy` when a slow app outlives its start period, then to
+    `healthy` once it's up. That must not roll back (taplistbuilder case)."""
+    fake.add(make_ctr())
+    publish_new(fake)
+    bad = {"Running": True, "Health": {"Status": "unhealthy", "Log": [{"Output": "Connection refused"}]}}
+    script_new_container(fake, monkeypatch, [bad, bad, bad, {"Running": True, "Health": {"Status": "healthy"}}], HC)
+    hup.update("web")
+    assert hup.state["web"]["job"] == "updated"
+    waits = [e["msg"] for e in hup.logs if e["event"] == "health" and "failing so far" in e["msg"]]
+    assert waits == ["healthcheck failing so far; waiting up to 60s more (Connection refused)"]
+
+
+def test_health_timeout_label(hup, fake, monkeypatch):
+    c = make_ctr()
+    fake.add(c)
+    publish_new(fake)
+    starting = {"Running": True, "Health": {"Status": "starting"}}
+    real = fake.inspect
+
+    def inspect(cid):
+        x = real(cid)
+        if x["Id"].startswith("new"):
+            x["Config"]["Healthcheck"] = HC
+            x["Config"]["Labels"] = {"updock.health-timeout": "5m"}
+            x["State"] = starting
+        return x
+    monkeypatch.setattr(fake, "inspect", inspect)
+    hup.update("web")
+    assert "not healthy after 300s" in hup.state["web"]["message"]
+
+
+def test_invalid_health_timeout_label(hup, fake):
+    info = {"Config": {"Labels": {"updock.health-timeout": "a while"}}}
+    assert hup.health_timeout_for("web", info) == 60
+    assert any("invalid updock.health-timeout" in e["msg"] for e in hup.logs)
+    assert hup.health_timeout_for("web", {"Config": {"Labels": None}}) == 60

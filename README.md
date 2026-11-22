@@ -75,7 +75,7 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 
 1. Asks the registry which digest the container's tag (`nginx:latest`, etc.) points to — a single `HEAD` request, which doesn't download anything or count against Docker Hub pull limits — and compares it with the running image. If the registry can't be reached (or `UPDOCK_DIGEST_CHECK=false`), it falls back to pulling.
 2. If there is a newer image, it pulls it, stops the container, renames it, creates a replacement with the same config (env, ports, volumes incl. anonymous ones, networks + aliases, labels, restart policy), and starts it.
-3. It then verifies the new container: if the image has a healthcheck it must become `healthy` within `UPDOCK_HEALTH_TIMEOUT`; otherwise it must stay running (no exit, no restart loop) for `UPDOCK_STARTUP_GRACE` seconds. The old container is kept (stopped, renamed) until then.
+3. It then verifies the new container: if the image has a healthcheck it must become `healthy` within `UPDOCK_HEALTH_TIMEOUT` (per container: label `updock.health-timeout=5m`). A temporary `unhealthy` while a slow app starts is tolerated — Docker reports that when an app outlives its healthcheck's start period and flips to `healthy` later — so only the timeout, an exit or a restart loop counts as failure; otherwise it must stay running (no exit, no restart loop) for `UPDOCK_STARTUP_GRACE` seconds. The old container is kept (stopped, renamed) until then.
 4. On any failure it rolls back to the old container and marks the row **rolled-back** with the reason. Scheduled runs won't retry the same broken image; **Update now** still can.
 5. On success it removes the old container and, if `UPDOCK_CLEANUP=true`, the old image (see below).
 
