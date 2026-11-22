@@ -44,9 +44,9 @@ def auth_help(host, name):
         "registry-1.docker.io": "your Docker Hub username and an access token",
         "docker.io": "your Docker Hub username and an access token",
     }.get(host, "a username and password/token for it")
-    return (f"{host} refused access to {name} (private image or missing login). Add a "
-            f"registry login for {host} using {hint}: mount a docker config.json at "
-            f"/config/config.json (docker login {host}).")
+    shown = "docker.io" if host in HUB_ALIASES else host
+    return (f"{shown} refused access to {name} (private image or missing/expired login). "
+            f"Add a login for {shown} with {hint} under Registries in the Updock header.")
 
 
 class RateLimited(RegistryError):
@@ -178,6 +178,32 @@ class Registry:
         return self.c.request(method, target, headers={k: v for k, v in (kw.get("headers") or {}).items()
                                                         if k.lower() != "authorization"},
                               follow_redirects=True)
+
+    def forget(self, key):
+        """Drop cached tokens for a registry (after its login changed)."""
+        host = "registry-1.docker.io" if key.startswith("https://index.docker.io") else key
+        self._auth = {k: v for k, v in self._auth.items() if k[0] != host}
+
+    def verify_login(self, key, username, password):
+        """Check credentials against the registry's auth endpoint before saving them.
+        Raises RegistryAuthError if they're rejected."""
+        host = "registry-1.docker.io" if key.startswith("https://index.docker.io") else key
+        r = self.c.get(f"https://{host}/v2/", follow_redirects=False)
+        if r.status_code == 200:
+            return  # registry without auth: nothing to verify
+        if r.status_code != 401:
+            raise RegistryError(f"{host}: unexpected status {r.status_code} from /v2/")
+        scheme, p = _challenge(r.headers.get("www-authenticate", ""))
+        if scheme == "bearer" and "realm" in p:
+            params = {"service": p["service"]} if "service" in p else {}
+            r = self.c.get(p["realm"], params=params, auth=(username, password))
+        else:
+            r = self.c.get(f"https://{host}/v2/", auth=(username, password),
+                           follow_redirects=False)
+        if r.status_code in (401, 403):
+            raise RegistryAuthError(host, "the login check", r.status_code)
+        if r.status_code >= 400:
+            raise RegistryError(f"{host}: login check failed with status {r.status_code}")
 
     def tags(self, ref):
         host, name = parse_repo(ref)

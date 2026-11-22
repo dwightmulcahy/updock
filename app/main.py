@@ -12,12 +12,16 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
 from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
                                StreamingResponse)
 
 from . import metrics as metricsmod
 from .config import load_env
-from .docker_api import Docker
+from . import docker_api
+from .docker_api import Docker, normalize_registry
+from .logins import RegistryLogins, display_host
+from .registry import RegistryAuthError
 from .events import EventHub
 from . import events as eventsmod
 from .notify import EmailNotifier
@@ -67,6 +71,8 @@ def init_store(directory, buf):
 
 
 STORE = init_store(os.getenv("UPDOCK_DATA_DIR", "/data"), LOGBUF)
+LOGINS = RegistryLogins(os.path.join(STORE.dir, "registries.json") if STORE else None)
+docker_api.CREDENTIAL_PROVIDERS.append(LOGINS.get)
 LOG_COUNTS = {}
 LOGBUF.listeners.append(lambda e: LOG_COUNTS.__setitem__(e["level"], LOG_COUNTS.get(e["level"], 0) + 1))
 METRICS_PUBLIC = env_bool("UPDOCK_METRICS_PUBLIC", False)
@@ -363,6 +369,51 @@ async def events(request: Request):
     return StreamingResponse(eventsmod.stream(HUB, q, request.is_disconnected),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class LoginIn(BaseModel):
+    host: str
+    username: str
+    password: str
+
+
+@app.get("/api/registries")
+def registries():
+    return {"logins": LOGINS.list(), "persisted": bool(LOGINS.path)}
+
+
+@app.post("/api/registries")
+def add_registry(login: LoginIn, verify: bool = True):
+    host, user = login.host.strip(), login.username.strip()
+    if not host or not user or not login.password:
+        raise HTTPException(400, "host, username and password are required")
+    key = normalize_registry(host)
+    if verify and up.registry:
+        try:
+            up.registry.verify_login(key, user, login.password)
+        except RegistryAuthError:
+            raise HTTPException(400, f"{display_host(key)} rejected this username/password")
+        except Exception as e:
+            raise HTTPException(502, f"could not verify the login with {display_host(key)}: {e}"
+                                     " (save without checking to keep it anyway)")
+    LOGINS.set(key, user, login.password)
+    if up.registry:
+        up.registry.forget(key)
+    up._backoff.pop(key, None)
+    names = [n for n, st in up.state.items() if st.get("job") == "auth-required"
+             and normalize_registry(st.get("auth_host")) == key]
+    bg(up.recheck_auth, key)
+    return {"saved": True, "host": display_host(key), "rechecking": names}
+
+
+@app.delete("/api/registries/{host}")
+def remove_registry(host: str):
+    key = normalize_registry(host)
+    if not LOGINS.remove(key):
+        raise HTTPException(404, f"no saved login for {display_host(key)}")
+    if up.registry:
+        up.registry.forget(key)
+    return {"removed": display_host(key)}
 
 
 @app.get("/api/notify")

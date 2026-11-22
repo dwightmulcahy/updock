@@ -51,11 +51,25 @@ def split_ref(ref):
     return ref, "latest"
 
 
+HUB_KEY = "https://index.docker.io/v1/"
+HUB_HOSTS = {"docker.io", "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com",
+             "hub.docker.com"}
+# Extra credential sources (e.g. logins saved in the UI): callables(registry_key) -> (user, pw)
+CREDENTIAL_PROVIDERS = []
+
+
+def normalize_registry(host):
+    """'ghcr.io', 'https://ghcr.io/', 'docker.io' ... -> the key Docker uses for logins."""
+    h = (host or "").strip().lower()
+    h = h.split("://", 1)[-1].split("/", 1)[0]
+    return HUB_KEY if h in HUB_HOSTS or not h else h
+
+
 def registry_of(repo):
     first = repo.split("/", 1)[0]
     if "/" in repo and ("." in first or ":" in first or first == "localhost"):
-        return first
-    return "https://index.docker.io/v1/"
+        return normalize_registry(first)
+    return HUB_KEY
 
 
 def _cred_helper(helper, server):
@@ -78,15 +92,19 @@ def _cred_helper(helper, server):
 
 
 def registry_credentials(repo):
-    """(user, password, serveraddress) from a mounted docker config.json, or None.
-    Supports inline `auths` entries and `credHelpers` / `credsStore` helpers."""
+    """(user, password, serveraddress) from logins saved in the UI, then a mounted docker
+    config.json (inline `auths` entries, `credHelpers` / `credsStore` helpers), or None."""
+    reg = registry_of(repo)
+    for provider in CREDENTIAL_PROVIDERS:
+        creds = provider(reg)
+        if creds:
+            return creds[0], creds[1], reg
     path = os.path.join(os.getenv("DOCKER_CONFIG", "/config"), "config.json")
     try:
         with open(path) as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         return None
-    reg = registry_of(repo)
     keys = (reg, reg.replace("https://", "").rstrip("/"))
     auths = cfg.get("auths", {})
     entry = auths.get(keys[0]) or auths.get(keys[1])

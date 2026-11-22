@@ -318,12 +318,14 @@ from app.registry import auth_help  # noqa: E402
 @pytest.mark.parametrize("host,expect", [
     ("ghcr.io", "GitHub token with the read:packages scope"),
     ("registry-1.docker.io", "Docker Hub username and an access token"),
+    ("docker.io", "Docker Hub username and an access token"),
     ("quay.io", "a username and password/token"),
 ])
 def test_auth_help(host, expect):
     msg = auth_help(host, "o/app")
-    assert msg.startswith(f"{host} refused access to o/app") and expect in msg
-    assert f"docker login {host}" in msg
+    shown = "docker.io" if "docker.io" in host else host
+    assert msg.startswith(f"{shown} refused access to o/app") and expect in msg
+    assert "under Registries in the Updock header" in msg
 
 
 @pytest.mark.parametrize("path", ["manifests/latest", "tags/list"])
@@ -411,3 +413,57 @@ def test_token_server_error_is_plain_registry_error(mk):
     with pytest.raises(RegistryError, match="token request failed: 502") as e:
         r.digest("r.io/app")
     assert not isinstance(e.value, RegistryAuthError)
+
+
+
+# ---------- login verification ----------
+
+def _verifier(mk, v2_status=401, challenge='Bearer realm="https://auth.r.io/token",service="r.io"',
+              token_status=200, basic_status=200):
+    def h(q):
+        if q.url.path == "/v2/" and "authorization" not in q.headers:
+            return httpx.Response(v2_status, headers={"www-authenticate": challenge})
+        if q.url.path == "/v2/":
+            return httpx.Response(basic_status)
+        assert q.headers["authorization"].startswith("Basic ")
+        return httpx.Response(token_status, json={"token": "t"})
+    return mk(h)
+
+
+def test_verify_login_bearer_ok_and_rejected(mk):
+    r, reqs = _verifier(mk)
+    r.verify_login("r.io", "u", "p")
+    assert reqs[-1].url.params["service"] == "r.io"
+    r, _ = _verifier(mk, token_status=401)
+    with pytest.raises(RegistryAuthError):
+        r.verify_login("r.io", "u", "bad")
+    r, _ = _verifier(mk, token_status=500)
+    with pytest.raises(RegistryError, match="login check failed with status 500"):
+        r.verify_login("r.io", "u", "p")
+
+
+def test_verify_login_bearer_without_service_and_hub_host(mk):
+    r, reqs = _verifier(mk, challenge='Bearer realm="https://auth.r.io/token"')
+    r.verify_login("https://index.docker.io/v1/", "u", "p")
+    assert reqs[0].url.host == "registry-1.docker.io" and "service" not in reqs[-1].url.params
+
+
+def test_verify_login_basic_and_open_and_odd(mk):
+    r, _ = _verifier(mk, challenge='Basic realm="x"', basic_status=403)
+    with pytest.raises(RegistryAuthError):
+        r.verify_login("reg.local", "u", "bad")
+    r, _ = _verifier(mk, challenge='Basic realm="x"')
+    r.verify_login("reg.local", "u", "p")
+    r, _ = _verifier(mk, v2_status=200)
+    r.verify_login("open.local", "u", "p")
+    r, _ = _verifier(mk, v2_status=503)
+    with pytest.raises(RegistryError, match="unexpected status 503"):
+        r.verify_login("down.local", "u", "p")
+
+
+def test_forget_drops_cached_tokens():
+    r = Registry(httpx.Client())
+    r._auth = {("ghcr.io", "a"): {}, ("registry-1.docker.io", "b"): {}, ("quay.io", "c"): {}}
+    r.forget("ghcr.io")
+    r.forget("https://index.docker.io/v1/")
+    assert list(r._auth) == [("quay.io", "c")]
