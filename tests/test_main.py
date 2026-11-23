@@ -49,7 +49,7 @@ def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
         "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {},
-        "user": None}
+        "user": None, "cooldown_gate": "confirm"}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -657,3 +657,33 @@ def test_build_info(client, monkeypatch):
     assert b["python"] and b["platform"] and b["started_at"].endswith("Z")
     monkeypatch.delenv("GIT_SHA")
     assert client.get("/api/build-info").json()["commit"] is None
+
+
+# ---------- cooldown override gate ----------
+
+def test_cooldown_override_needs_admin_password(client, up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    h = {**_auth("admin", "s3cret"), "Content-Type": "application/json"}
+    r = client.post("/api/containers/web/update", headers=h,
+                    content='{"override_cooldown": true, "password": "nope"}')
+    assert r.status_code == 403 and "wrong admin password" in r.text
+    up.update.assert_not_called()
+    r = client.post("/api/containers/web/update", headers=h,
+                    content='{"override_cooldown": true, "password": "s3cret"}')
+    assert r.status_code == 202
+    up.update.assert_called_with("web", False, False, True)
+    assert "cooldown skipped by admin" in caplog.text
+    assert client.get("/api/containers", headers=h).json()["cooldown_gate"] == "password"
+
+
+def test_cooldown_override_with_token_or_without_password(client, up, monkeypatch):
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    monkeypatch.setattr(main, "API_TOKEN", "tok")
+    r = client.post("/api/containers/web/update", json={"override_cooldown": True},
+                    headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 202
+    up.update.assert_called_with("web", False, False, True)
+    monkeypatch.setattr(main, "UI_PASS", "")
+    assert client.post("/api/containers/web/update", json={"override_cooldown": True}).status_code == 202
+    assert client.post("/api/containers/web/update", json={}).status_code == 202
+    up.update.assert_called_with("web", False)

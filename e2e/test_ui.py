@@ -181,3 +181,33 @@ def test_project_groups_collapse_and_expand(page):
     page.click("#gcollapse")
     expect(page.locator("tr.row")).to_have_count(0)
     expect(page.locator("tr.grp")).to_have_count(2)
+
+
+def test_cooldown_needs_confirmation_and_password(page, up, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app import main
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(up.registry, "remote_info", lambda ref, platform=None: {
+        "id": "new", "digest": "sha256:newer", "tags": [], "version": "2.0.0",
+        "revision": None, "created": fresh})
+    up.cooldown = 86400
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    up.check_only("web")
+    ctx = page.context
+    ctx.set_extra_http_headers({"Authorization": "Basic YWRtaW46czNjcmV0"})  # admin:s3cret
+    page.reload()
+    r = row(page, "web")
+    expect(r.locator(".sicon.cool")).to_have_attribute("title", re.compile("in cooldown until"))
+    r.get_by_role("button", name="Update…").click()
+    dlg = page.locator("#cdlg")
+    expect(dlg).to_contain_text("2 hours ago")
+    page.fill("#cpass", "wrong")
+    page.click("#cgo")
+    expect(page.locator("#cmsg")).to_have_text("Wrong admin password.")
+    assert up.d.ctrs["web"]["Image"] != "sha256:new"
+    page.fill("#cpass", "s3cret")
+    page.click("#cgo")
+    expect(dlg).to_be_hidden()
+    expect(r).to_contain_text("updated", timeout=10000)
+    assert up.d.ctrs["web"]["Image"] == "sha256:new"

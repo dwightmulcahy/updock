@@ -181,6 +181,9 @@
   #ldlg input:not([type=checkbox]) { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
   #llist .li { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); }
   #lmsg.err { color:var(--err); } #lmsg.ok { color:var(--ok); }
+  #cmsg { color:var(--err); } button.danger { background:var(--err); color:#fff; }
+  #cpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  #cpass[hidden] { display:none; }
   @media (max-width: 640px) {
     header { padding:12px; gap:8px; } header h1 { flex-basis:100%; }
     main { padding:10px; }
@@ -292,6 +295,16 @@
   <div class="hd"><b id="btitle">Build info</b><button class="x" aria-label="Close" onclick="bdlg.close()">✕</button></div>
   <dl class="kv" id="blist"></dl>
   <div class="row"><button id="bcopy" onclick="copyBuildInfo()">Copy</button><button class="primary" onclick="bdlg.close()">Close</button></div>
+</dialog>
+<dialog id="cdlg" aria-labelledby="ctitle">
+  <b id="ctitle">Skip the cooldown?</b>
+  <p id="ctext" class="meta" style="max-width:440px;line-height:1.5"></p>
+  <form id="cform" onsubmit="overrideCooldown(event)" style="display:grid;gap:8px">
+    <input id="cpass" type="password" placeholder="Admin password" autocomplete="current-password" hidden>
+    <div class="meta" id="cmsg" role="status"></div>
+    <div class="row"><button type="button" onclick="cdlg.close()">Cancel</button>
+      <button class="primary danger" type="submit" id="cgo">Update anyway</button></div>
+  </form>
 </dialog>
 <dialog id="ldlg">
   <b>Registry logins</b>
@@ -427,14 +440,16 @@ function statusText(c) {
 // icon + colour for the status shown left of the container name
 const ICONS = { "up-to-date": ["ok", "✓"], updated: ["ok", "✓"], "update-available": ["up", "↑"],
   error: ["bad", "!"], "auth-required": ["bad", "🔒"], unverified: ["bad", "!"], "rolled-back": ["roll", "↺"],
-  cooldown: ["cool", "⏸"], skipped: ["cool", "⏸"], "rate-limited": ["cool", "⏸"],
+  cooldown: ["cool", "◷"], skipped: ["cool", "◷"], "rate-limited": ["cool", "◷"],
   deployed: ["purple", "⇄"], reverted: ["purple", "↺"], "pinned-digest": ["", "#"], queued: ["", "…"],
   excluded: ["", "⊘"], unchecked: ["", "○"] };
 function statusIcon(c, st) {
   const label = st.badge;
   if (busy(c.job)) return `<span class="sicon busy" title="${esc(label)}"><span class="spin"></span></span><span class="vh">${esc(label)}</span>`;
-  const [cls, glyph] = ICONS[c.queued ? "queued" : c.eligible ? (c.job || "unchecked") : "excluded"] || ["", "•"];
-  return `<span class="sicon ${cls}" title="${esc(label)}" aria-hidden="true">${glyph}</span><span class="vh">${esc(label)}</span>`;
+  const key = c.queued ? "queued" : !c.eligible ? "excluded" : c.update_available && c.cooldown ? "cooldown" : (c.job || "unchecked");
+  const [cls, glyph] = ICONS[key] || ["", "•"];
+  const tip = c.update_available && c.cooldown ? `update available · in cooldown${c.cooldown.until ? ` until ${new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"})}` : ""}` : label;
+  return `<span class="sicon ${cls}" title="${esc(tip)}" aria-hidden="true">${glyph}</span><span class="vh">${esc(label)}</span>`;
 }
 const STEPS = [["pull", "Pull"], ["stop", "Stop"], ["start", "Start"], ["health", "Health check"], ["cleanup", "Clean up"]];
 function progressBlock(c) {
@@ -454,6 +469,7 @@ function primaryAction(c) {
   if (c.queued) return `<button disabled>queued</button>`;
   if (!c.eligible) return "";
   if (c.job === "auth-required") return `<button class="primary" onclick="event.stopPropagation();openLogins('${esc(c.auth_host || "")}')">Add login</button>`;
+  if (c.update_available && c.cooldown) return `<button title="${esc(c.cooldown.message)}" onclick="event.stopPropagation();openCooldown(this.closest('tr').dataset.name)">Update…</button>`;
   if (c.update_available) return `<button class="primary" onclick="event.stopPropagation();post('/api/containers/${n}/update')">Update</button>`;
   return `<button onclick="event.stopPropagation();post('/api/containers/${n}/check')">Check</button>`;
 }
@@ -581,7 +597,7 @@ function rowMenu(ev, name) {
   const notes = (c.update_available && c.latest && c.latest.changelog) || (c.current && c.current.changelog);
   showMenu(ev, [
     { label: "Check now", disabled: dis, run: () => post(`/api/containers/${n}/check`) },
-    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => post(`/api/containers/${n}/update`) },
+    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
     { label: "Recreate (same image)", disabled: dis, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
     { label: "Versions…", disabled: dis, run: () => openVersions(name) },
     ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: dis,
@@ -610,7 +626,7 @@ function headerMenu(ev) {
 }
 
 // ---------- run banner ----------
-let RUN = null, LAST = null, hideDone = 0, optimistic = null;
+let RUN = null, LAST = null, hideDone = 0, optimistic = null, GATE = "confirm";
 const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
   "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
   "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually", "unverified": "signature check failed" };
@@ -670,7 +686,7 @@ async function refresh() {
                 sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     if (d.user) nx.textContent += ` · ${d.user}`;
-    DATA = d.containers;
+    DATA = d.containers; GATE = d.cooldown_gate || "confirm";
     RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;
     if (RUN) optimistic = null;
     renderRun();
@@ -914,6 +930,33 @@ function copyBuildInfo() {
 $("ver").addEventListener("click", openBuildInfo);
 $("ver").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openBuildInfo(); } });
 $("bdlg").addEventListener("click", e => { if (e.target === $("bdlg")) $("bdlg").close(); });
+
+// ---- skipping a cooldown: confirm, plus the admin password when one is set ----
+let COOL_NAME = null;
+function openCooldown(name) {
+  const c = DATA.find(x => x.name === name); if (!c || !c.cooldown) return;
+  COOL_NAME = name;
+  const l = c.latest || {}, built = l.created ? new Date(l.created) : null;
+  const age = built ? Math.max(0, Date.now() - built.getTime()) / 3600000 : null;
+  const until = c.cooldown.until ? new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : null;
+  $("ctitle").textContent = `Update ${name} during its cooldown?`;
+  $("ctext").textContent = (built ? `The new image of ${c.image} was built ${age < 1 ? "less than an hour" : `${Math.round(age)} hour${Math.round(age) === 1 ? "" : "s"}`} ago` : `The new image of ${c.image} has no build date`) +
+    `, and the cooldown is ${Math.round(c.cooldown.delay / 3600)}h${until ? ` (it would be applied automatically after ${until})` : ""}. ` +
+    "The cooldown gives broken or compromised releases time to be noticed and pulled before they reach you. Updating now skips that safety margin.";
+  $("cpass").hidden = GATE !== "password"; $("cpass").required = GATE === "password"; $("cpass").value = "";
+  $("cmsg").textContent = "";
+  $("cdlg").showModal();
+  (GATE === "password" ? $("cpass") : $("cgo")).focus();
+}
+async function overrideCooldown(ev) {
+  ev.preventDefault();
+  const r = await fetch(`/api/containers/${encodeURIComponent(COOL_NAME)}/update`, {
+    method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ override_cooldown: true, password: $("cpass").value }) });
+  if (r.status === 403) { $("cmsg").textContent = "Wrong admin password."; $("cpass").select(); return; }
+  if (!r.ok) { const d = await r.json().catch(() => ({})); $("cmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
+  $("cdlg").close(); setTimeout(refresh, 300);
+}
 </script>
 </body>
 </html>
