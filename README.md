@@ -153,6 +153,18 @@ For every container the UI shows the **running** image and, after a check, the *
 
 **Versions…** lists the tags published for the container's image (selecting one shows its version, digest, image ID and build date from the registry) (Docker Hub, GHCR, Quay, LSCR or any v2 registry; private ones via the mounted `config.json`), newest version first. Deploying a tag recreates the container from `repo:<tag>`, so it stays on that tag; deploy `latest` (or the tag you track) to resume normal updates. The previous image is kept after a version deploy so switching back is instant.
 
+### Following version tags (semver)
+
+A container on a version tag (`app:1.4.2`) only gets rebuilds of that same tag. Add the label `updock.semver` to move it to newer version tags instead:
+
+| Label | `1.4.2` may move to | Never to |
+|---|---|---|
+| `updock.semver=patch` | `1.4.9` | `1.5.0`, `2.0.0` |
+| `updock.semver=minor` | `1.9.0` | `2.0.0` |
+| `updock.semver=major` | `3.0.0` | — |
+
+The tag keeps its shape: a `v` prefix, the number of parts (`1.4` follows `1.x`, not `1.5.1`) and a suffix (`1.4.2-alpine` only moves to `-alpine` tags; pre-releases such as `-rc1` are never picked for a plain release). When no newer tag is in range, the current tag is still checked for a rebuild. Cooldown, health checks and rollback work as usual; the row shows the new tag. Compose users: `docker compose up` recreates from the tag in the compose file, so bump it there too (or use a range-style tag such as `1.4`).
+
 ### Old image cleanup
 
 After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.

@@ -296,7 +296,7 @@ function versionCell(c) {
   const cur = verText(c.current, c.image) || '<span class="unk">?</span>';
   const l = c.latest;
   if (c.update_available && l) {
-    const nv = l.note ? `<span class="unk" title="${esc(l.note)}">newer image</span>` : (verText(l, c.image) || '<span class="unk">newer</span>');
+    const nv = l.note ? `<span class="unk" title="${esc(l.note)}">newer image</span>` : (verText(l, c.target_ref || c.image) || '<span class="unk">newer</span>');
     return `<div class="ver">${cur}<span class="arrow">→</span><span class="new">${nv}</span></div>`;
   }
   if (l && c.job === "up-to-date") return `<div class="ver">${cur}<span class="same" title="Latest available">✓</span></div>`;

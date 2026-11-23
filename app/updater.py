@@ -14,6 +14,7 @@ from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
                        RegistryError, parse_repo)
+from .semver import LEVELS, SEMVER_LABEL, best as semver_best
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
@@ -322,7 +323,7 @@ class Updater:
     def check(self, name):
         ctr = self.d.inspect(name)
         ref = ctr["Config"]["Image"]
-        self._set(name, ref=ref)
+        self._set(name, ref=ref, target_ref=None)
         if split_ref(ref)[1] is None:
             self._set(name, job="pinned-digest", message="Image is pinned by digest/ID", last_check=time.time())
             return ctr, False
@@ -330,6 +331,19 @@ class Updater:
         wait = self._backoff_left(host)
         if wait:
             raise RateLimited(host, wait, waiting=True)  # don't touch the registry at all
+        level = self.semver_level(name, ctr)
+        if self.registry and level:
+            try:
+                if self._check_semver(name, ctr, ref, level):
+                    self._backoff.pop(host, None)
+                    return ctr, True
+            except RateLimited as e:
+                raise self._rate_limited(e)
+            except RegistryAuthError:
+                raise
+            except Exception as e:
+                self._log(f"{SEMVER_LABEL}: couldn't list tags ({e}); checking {ref} only",
+                          logging.WARNING, name, "check")
         if self.registry and self.digest_check:
             try:
                 avail = self._check_remote(name, ctr, ref)
@@ -344,6 +358,48 @@ class Updater:
                           logging.DEBUG, name, "check")
         avail = self._pull_guarded(name, ctr, ref)
         return ctr, avail
+
+    def semver_level(self, name, ctr):
+        """Label updock.semver=patch|minor|major: follow newer version tags in that range."""
+        raw = (ctr["Config"].get("Labels") or {}).get(SEMVER_LABEL)
+        if not raw:
+            return None
+        level = raw.strip().lower()
+        if level in LEVELS:
+            return level
+        if name not in self._bad_labels:
+            self._bad_labels.add(name)
+            self._log(f"invalid {SEMVER_LABEL}={raw!r} (use patch, minor or major); "
+                      "ignoring it", logging.WARNING, name, "check")
+        return None
+
+    def _check_semver(self, name, ctr, ref, level):
+        """Look for a newer version tag within `level`. Returns True (and records it as
+        the update target) if one exists; False to fall back to the same-tag check."""
+        tag = split_ref(ref)[1]
+        self._set(name, job="checking", message=f"Looking for newer {level} versions of {ref}")
+        newer = semver_best(tag, self.registry.tags(ref), level)
+        if not newer:
+            self._log(f"no newer {level} version than {tag}", logging.DEBUG, name, "check")
+            return False
+        target = f"{base_repo(ref)}:{newer}"
+        try:
+            local = self.d.image(ctr["Image"])
+            platform = {"os": local.get("Os"), "architecture": local.get("Architecture"),
+                        "variant": local.get("Variant")}
+        except Exception:
+            platform = None
+        try:
+            latest = self.registry.remote_info(target, platform)
+        except Exception as e:
+            latest = {"id": None, "digest": None, "tags": [], "version": None,
+                      "revision": None, "created": None, "note": f"details unavailable: {e}"}
+        latest["tag"] = newer
+        self._unpulled.add(name)
+        self._log(f"newer {level} version: {tag} -> {newer}", container=name, event="check")
+        self._set(name, job="update-available", latest=latest, update_available=True,
+                  target_ref=target, last_check=time.time(), message="")
+        return True
 
     def _backoff_left(self, host):
         b = self._backoff.get(host)
@@ -494,8 +550,9 @@ class Updater:
                     self._set(name, job="cooldown", message=blocked)
                     self._log(blocked, container=name, event="cooldown")
                     return
+            target_ref = self.state[name].get("target_ref") if avail else None
             if avail and name in self._unpulled:
-                avail = self._pull_guarded(name, ctr, ctr["Config"]["Image"])
+                avail = self._pull_guarded(name, ctr, target_ref or ctr["Config"]["Image"])
             if not (avail or force):
                 self._log("up to date", container=name, event="check")
                 return
@@ -514,7 +571,8 @@ class Updater:
                 self._log("stopped, but will be started after the update (revive)",
                           container=name, event="update")
             try:
-                self._recreate(ctr, cleanup=True, start=True if revive else None)
+                self._recreate(ctr, image_ref=target_ref, cleanup=True,
+                               start=True if revive else None)
                 self._restart_compose_dependents(ctr)
             except UnhealthyError:
                 if avail:
@@ -522,7 +580,8 @@ class Updater:
                 raise
             self.counters["result_updated" if avail else "result_recreated"] += 1
             self._set(name, job="updated", update_available=False, last_update=time.time(),
-                      message="", failed_image=None)
+                      message="", failed_image=None, target_ref=None,
+                      **({"ref": target_ref} if target_ref else {}))
             self._log("updated" if avail else "recreated", container=name,
                       event="update" if avail else "recreate")
             if avail:
@@ -636,7 +695,8 @@ class Updater:
         new = self.state[name].get("latest") or {}
         fmt = lambda i: " ".join(x for x in (i.get("version") or "",
                                               f"({i['id']})" if i.get("id") else "") if x) or "?"
-        text = f"{ctr['Config']['Image']} {fmt(old)} -> {fmt(new)}"
+        target = self.state[name].get("target_ref")
+        text = f"{ctr['Config']['Image']} {fmt(old)} -> {target + ' ' if target else ''}{fmt(new)}"
         notes = self.changelog(new, (ctr["Config"].get("Labels") or {}).get(TEMPLATE_LABEL))
         return text + (f"\nRelease notes: {notes}" if notes else "")
 
