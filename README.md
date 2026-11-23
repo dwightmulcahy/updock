@@ -172,6 +172,17 @@ A container on a version tag (`app:1.4.2`) only gets rebuilds of that same tag. 
 
 The tag keeps its shape: a `v` prefix, the number of parts (`1.4` follows `1.x`, not `1.5.1`) and a suffix (`1.4.2-alpine` only moves to `-alpine` tags; pre-releases such as `-rc1` are never picked for a plain release). When no newer tag is in range, the current tag is still checked for a rebuild. Cooldown, health checks and rollback work as usual; the row shows the new tag. Compose users: `docker compose up` recreates from the tag in the compose file, so bump it there too (or use a range-style tag such as `1.4`).
 
+### Signature checks (cosign)
+
+Opt in per container to require a valid [cosign](https://github.com/sigstore/cosign) signature before a new image replaces the running one. The check runs on the exact digest that was pulled, after the pull and before anything is stopped; a failure leaves the container untouched, shows **unverified**, sends an error email, and scheduled runs skip that digest until you press **Update now**. Version deploys are checked too; manual rollbacks (to an image that already ran) are not.
+
+| Label | Meaning |
+|---|---|
+| `updock.cosign.key=/keys/app.pub` | Signed with this public key (mount it into the Updock container, e.g. `./keys:/keys:ro`). KMS URIs work as well |
+| `updock.cosign.identity=^https://github.com/me/app/` + `updock.cosign.issuer=^https://token\.actions\.githubusercontent\.com$` | Keyless (Sigstore) signature whose certificate identity and OIDC issuer match these regular expressions — e.g. images signed from GitHub Actions |
+
+cosign ships in the Updock image. Keyless checks and the transparency log need outbound HTTPS to Sigstore (`tuf-repo-cdn.sigstore.dev`, `rekor.sigstore.dev`, `fulcio.sigstore.dev`); the trust root is cached in `/data/sigstore`. Private registries use the same logins as pulls.
+
 ### Old image cleanup
 
 After an update to a new image, the superseded image is deleted: any other tags of the same repository still pointing at it are untagged, then the image is removed. It is kept (and the log says why) if another container — running or stopped — still uses it, or if a different repository also tags it.

@@ -10,8 +10,9 @@ from collections import Counter, defaultdict
 
 import httpx
 
+from . import cosign
 from .changelog import TEMPLATE_LABEL, changelog_url, source_of
-from .docker_api import DockerError, split_ref
+from .docker_api import DockerError, registry_credentials, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
@@ -195,7 +196,7 @@ class Updater:
                  digest_check=True, notifier=None, store=None, include_stopped=False,
                  cooldown=0, hooks=False, disk_max=0, disk_warn=0, exclude_names=(),
                  include_images=(), exclude_images=(), scope=None, revive_stopped=False,
-                 probe=None):
+                 probe=None, cosign_data_dir=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -225,6 +226,7 @@ class Updater:
         self.scope = scope or None
         self.revive_stopped = revive_stopped
         self.probe = probe or http_probe
+        self.cosign_data_dir = cosign_data_dir
         self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
         self.on_run = None     # callback(run status or None) for the UI's run banner
@@ -527,6 +529,11 @@ class Updater:
             self.counters["result_skipped"] += 1
             self._set(name, job="skipped", message=str(e))
             self._log(str(e), container=name, event="hook")
+        except cosign.SignatureError as e:
+            self.counters["result_unverified"] += 1
+            self._set(name, job="unverified", message=str(e))
+            self._log(str(e), logging.ERROR, name, "signature")
+            self.notifier.notify("error", name, str(e))
         except UnhealthyError as e:
             self.counters["result_rolled_back"] += 1
             self._set(name, job="rolled-back", message=str(e))
@@ -563,11 +570,20 @@ class Updater:
                     self._log(blocked, container=name, event="cooldown")
                     return
             target_ref = self.state[name].get("target_ref") if avail else None
+            new_digest = (self.state[name].get("latest") or {}).get("digest")
+            if scheduled and avail and new_digest and \
+                    new_digest == self.state[name].get("unverified_digest"):
+                self._log(f"skipping {new_digest[7:19]}: its signature check failed before; "
+                          "use Update now to retry", logging.WARNING, name, "signature")
+                self._set(name, job="unverified")
+                return
             if avail and name in self._unpulled:
                 avail = self._pull_guarded(name, ctr, target_ref or ctr["Config"]["Image"])
             if not (avail or force):
                 self._log("up to date", container=name, event="check")
                 return
+            if avail:
+                self._verify_signature(name, ctr, target_ref or ctr["Config"]["Image"])
             target = (self.state[name].get("latest") or {}).get("id")
             failed = self.state[name].get("failed_image")
             if scheduled and avail and target and target == failed:
@@ -765,6 +781,7 @@ class Updater:
             new_ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
             self._set(name, job="pulling", step="pull", message=f"Pulling {new_ref}")
             self._pull_image(name, new_ref)
+            self._verify_signature(name, ctr, new_ref)
             self._set(name, job="updating", message=f"Deploying {new_ref}")
             prev = self._previous_of(ctr)
             # Keep the previous image so switching back is instant.
@@ -775,6 +792,29 @@ class Updater:
             self._log(f"deployed {new_ref}", container=name, event="deploy")
             self.notifier.notify("deploy", name, f"deployed {new_ref}")
         self._locked(name, job)
+
+    def _verify_signature(self, name, ctr, ref):
+        """With updock.cosign.* labels: the pulled image must carry a valid signature,
+        checked on the exact digest that was pulled, before anything is replaced."""
+        args = cosign.policy_args(ctr["Config"].get("Labels"))
+        if args is None:
+            return
+        want = parse_repo(ref)
+        img = self.d.image(ref)
+        digests = [d for d in img.get("RepoDigests") or [] if parse_repo(d) == want]
+        if not digests:
+            raise cosign.SignatureError(f"{ref} has no registry digest, so its signature "
+                                        "can't be checked")
+        target = f"{base_repo(ref)}@{digests[0].split('@', 1)[1]}"
+        self._set(name, message=f"Checking the signature of {target}")
+        try:
+            cosign.run(args, target, credentials=registry_credentials(ref),
+                       data_dir=self.cosign_data_dir)
+        except cosign.SignatureError:
+            self._set(name, unverified_digest=digests[0].split("@", 1)[1])
+            raise
+        self._set(name, unverified_digest=None)
+        self._log(f"signature verified for {target}", container=name, event="signature")
 
     def _previous_of(self, ctr):
         """What the container runs now, so a later rollback can restore it."""

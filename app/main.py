@@ -148,7 +148,8 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              include_images=env_list("UPDOCK_INCLUDE_IMAGES"),
              exclude_images=env_list("UPDOCK_EXCLUDE_IMAGES"),
              scope=os.getenv("UPDOCK_SCOPE", "").strip() or None,
-             revive_stopped=env_bool("UPDOCK_REVIVE_STOPPED", False))
+             revive_stopped=env_bool("UPDOCK_REVIVE_STOPPED", False),
+             cosign_data_dir=STORE.dir if STORE else None)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
