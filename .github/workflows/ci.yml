@@ -54,7 +54,6 @@ jobs:
           set -euo pipefail
           docker run --rm --platform linux/arm/v7 updock:armv7 python -c \
             "import platform, sys; print(platform.machine(), sys.version.split()[0]); assert platform.machine().startswith('armv7')"
-          docker run --rm --platform linux/arm/v7 --entrypoint cosign updock:armv7 version
           docker run -d --name armv7 --platform linux/arm/v7 -p 8090:8080 -e UPDOCK_INTERVAL=0 \
             --read-only --tmpfs /tmp updock:armv7
           for i in $(seq 1 60); do curl -fsS http://localhost:8090/livez && exit 0; sleep 2; done
@@ -118,10 +117,6 @@ jobs:
               echo "pull of $img failed (attempt $i), retrying in $((i * 10))s"; sleep $((i * 10))
             done
           done
-      - name: cosign is bundled and runs
-        run: |
-          docker run --rm --entrypoint cosign ${IMAGE} version
-          docker image inspect ${IMAGE} --format 'image size: {{.Size}} bytes'
       - name: Start hardened container
         run: |
           # secrets as files (chmod 600, owned by the runner user), like ./secrets with Compose

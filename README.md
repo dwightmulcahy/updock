@@ -181,7 +181,14 @@ Opt in per container to require a valid [cosign](https://github.com/sigstore/cos
 | `updock.cosign.key=/keys/app.pub` | Signed with this public key (mount it into the Updock container, e.g. `./keys:/keys:ro`). KMS URIs work as well |
 | `updock.cosign.identity=^https://github.com/me/app/` + `updock.cosign.issuer=^https://token\.actions\.githubusercontent\.com$` | Keyless (Sigstore) signature whose certificate identity and OIDC issuer match these regular expressions — e.g. images signed from GitHub Actions |
 
-cosign ships in the Updock image. Keyless checks and the transparency log need outbound HTTPS to Sigstore (`tuf-repo-cdn.sigstore.dev`, `rekor.sigstore.dev`, `fulcio.sigstore.dev`); the trust root is cached in `/data/sigstore`. Private registries use the same logins as pulls.
+cosign is **not** bundled: the published cosign binaries carry dozens of known HIGH/CRITICAL CVEs in their Go dependencies, which would fail Updock's image scan and add ~100 MB for a feature most setups don't use. Add it when you want signature checks — either a two-line image:
+
+```dockerfile
+FROM ghcr.io/dwightmulcahy/updock:latest
+COPY --from=ghcr.io/sigstore/cosign/cosign:v3.0.4 /ko-app/cosign /usr/local/bin/cosign
+```
+
+or mount a cosign binary from the host (`- /usr/local/bin/cosign:/usr/local/bin/cosign:ro`; another path via `UPDOCK_COSIGN=/path/to/cosign`). Without it, labelled containers show **unverified** ("cosign is not installed") rather than updating unchecked. Keyless checks and the transparency log need outbound HTTPS to Sigstore (`tuf-repo-cdn.sigstore.dev`, `rekor.sigstore.dev`, `fulcio.sigstore.dev`); the trust root is cached in `/data/sigstore`. Private registries use the same logins as pulls.
 
 ### Old image cleanup
 
