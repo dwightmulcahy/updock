@@ -282,6 +282,11 @@ class Docker:
         if r.status_code != 204:
             raise http_error(r, r.text)
 
+    def tag_image(self, src, ref):
+        """Point tag `ref` (repo:tag) at image `src`."""
+        repo, tag = split_ref(ref)
+        self._req("POST", f"/images/{quote(src, safe='')}/tag", params={"repo": repo, "tag": tag})
+
     def remove_image(self, ref):
         """Delete an image by ID, or untag it when given a tag."""
         self._req("DELETE", f"/images/{quote(ref, safe='')}")

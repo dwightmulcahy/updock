@@ -442,3 +442,12 @@ def test_engine_json_403_kept(mock_docker):
     s["handler"] = lambda r: httpx.Response(403, text='{"message":"operation not permitted"}')
     with pytest.raises(DockerError, match="operation not permitted"):
         d.inspect("x")
+
+
+def test_tag_image(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(201)
+    d.tag_image("sha256:abc", "ghcr.io/me/app:1.0")
+    req = s["requests"][-1]
+    assert req.method == "POST" and req.url.raw_path.startswith(b"/images/sha256%3Aabc/tag")
+    assert dict(req.url.params) == {"repo": "ghcr.io/me/app", "tag": "1.0"}

@@ -111,7 +111,7 @@
   .le pre { margin:4px 0 0; color:var(--dim); white-space:pre-wrap; }
   .le summary { color:var(--dim); cursor:pointer; font-size:11px; }
   mark { background:#4f8cff55; color:inherit; border-radius:2px; }
-  .deployed { background:#2a1f3d; color:#b48cff; }
+  .deployed, .reverted { background:#2a1f3d; color:#b48cff; }
   .pinned-badge { background:#2a2f3d; color:#9fb4ff; }
   tr.stopped td { opacity:.55; } tr.stopped td:last-child { opacity:1; }
   .bar { height:4px; background:var(--line); border-radius:2px; margin-top:6px; width:120px; overflow:hidden; }
@@ -308,7 +308,7 @@ function statusText(c) {
   if (c.job === "pulling" && c.progress != null) return { badge: `pulling ${c.progress}%`, cls: "pulling" };
   const job = c.job || (c.pinned || c.monitor_only ? "" : "unchecked");
   const badge = (job || "unchecked").replaceAll("-", " ");
-  const show = PROBLEM.has(job) || ["cooldown", "skipped"].includes(job);
+  const show = PROBLEM.has(job) || ["cooldown", "skipped", "reverted"].includes(job);
   return { badge, cls: job, msg: show ? c.message : "", info: !PROBLEM.has(job) };
 }
 const STEPS = [["pull", "Pull"], ["stop", "Stop"], ["start", "Start"], ["health", "Health check"], ["cleanup", "Clean up"]];
@@ -411,6 +411,7 @@ function closeMenu() { $("menu").hidden = true; }
 document.addEventListener("click", e => { if (!e.target.closest("#menu") && !e.target.closest(".more")) closeMenu(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
 addEventListener("scroll", closeMenu, { passive: true });
+function prevLabel(p) { return p.version || (p.ref && tagOf(p.ref) !== "latest" && tagOf(p.ref)) || short(p.id || p.digest || p.image || "") || "previous"; }
 function rowMenu(ev, name) {
   const c = DATA.find(x => x.name === name); if (!c) return;
   const n = encodeURIComponent(name), dis = busy(c.job) || !c.eligible;
@@ -420,6 +421,8 @@ function rowMenu(ev, name) {
     { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => post(`/api/containers/${n}/update`) },
     { label: "Recreate (same image)", disabled: dis, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
     { label: "Versions…", disabled: dis, run: () => openVersions(name) },
+    ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: dis,
+        run: () => confirm(`Roll ${name} back to ${prevLabel(c.previous)}? It will be pinned so scheduled runs don't update it again.`) && post(`/api/containers/${n}/rollback`) }] : []),
     "-",
     { label: c.pinned ? "Unpin (allow scheduled updates)" : "Pin (scheduled runs only check)", disabled: !c.eligible, run: () => post(`/api/containers/${n}/pin?pinned=${!c.pinned}`) },
     { label: "Show logs", run: () => pickContainer(name) },
@@ -439,7 +442,7 @@ function headerMenu(ev) {
 let RUN = null, LAST = null, hideDone = 0, optimistic = null;
 const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
   "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
-  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest" };
+  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually" };
 function renderRun() {
   const bar = $("runbar"), active = RUN || optimistic;
   $("btn-check-all").disabled = $("btn-update-all").disabled = !!active;

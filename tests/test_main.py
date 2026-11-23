@@ -262,6 +262,11 @@ def test_deploy_endpoint(client, up):
     assert client.post("/api/containers/web/deploy").status_code == 422
 
 
+def test_rollback_endpoint(client, up):
+    assert client.post("/api/containers/web/rollback").status_code == 202
+    up.rollback.assert_called_with("web")
+
+
 # ---------- CSRF / security headers ----------
 
 SAME = {"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin", "X-Updock-Request": "1"}
