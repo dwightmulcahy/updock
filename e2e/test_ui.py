@@ -85,3 +85,25 @@ def test_logs_panel_filters(page, up):
     expect(page.locator(".le").first).to_be_visible()
     page.fill("input[placeholder^='Search messages']", "update available")
     expect(page.locator(".le .m", has_text="update available").first).to_be_visible()
+
+
+def test_theme_toggle_persists(page):
+    assert page.evaluate("document.documentElement.dataset.theme") is None  # auto
+    page.click("header button.more")
+    page.get_by_role("button", name=re.compile("^Theme: auto")).click()
+    assert page.evaluate("document.documentElement.dataset.theme") == "light"
+    bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
+    page.reload()
+    assert page.evaluate("document.documentElement.dataset.theme") == "light"
+    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == bg == "rgb(244, 246, 249)"
+
+
+def test_mobile_layout_fits_screen(browser, server, up):
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True)
+    p = ctx.new_page()
+    p.goto(server)
+    p.wait_for_selector("tr.row")
+    expect(p.locator("thead")).to_be_hidden()
+    assert p.evaluate("document.documentElement.scrollWidth") <= 390
+    expect(p.locator('tr.row[data-name="web"]').get_by_role("button", name="Check")).to_be_in_viewport()
+    ctx.close()
