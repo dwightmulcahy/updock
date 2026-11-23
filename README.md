@@ -250,6 +250,19 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 
 `GET /api/events` is a Server-Sent Events stream of `state` (container status/progress changes) and `log` (new log entries) events. The UI uses it for live updates and only falls back to polling when it can't connect.
 
+
+### Sign-in through a reverse proxy (Authelia, Authentik, …)
+
+If Updock sits behind a proxy that already signs users in, let the proxy's user header replace the password:
+
+```env
+UPDOCK_AUTH_HEADER=Remote-User              # Authelia; Authentik: X-authentik-username
+UPDOCK_TRUSTED_PROXIES=172.18.0.10          # the proxy's address(es) as Updock sees them; CIDRs allowed
+UPDOCK_AUTH_USERS=alice,bob                 # optional allowlist
+```
+
+The header is only believed on requests that come from a trusted proxy address; from there, a missing or non-allowed user gets 401. Requests that bypass the proxy still need `UPDOCK_PASSWORD` — and if no password is set, they are refused, so publishing port 8080 directly can't skip the proxy's login. Without `UPDOCK_TRUSTED_PROXIES` the header is ignored (and an error is logged). The signed-in user is shown in the header. Probes, the API token and public metrics work as before. Make sure the proxy strips the header from incoming requests (Authelia and Authentik do).
+
 ## Config
 
 | Var | Default | |
@@ -277,6 +290,7 @@ curl -H "Authorization: Bearer $UPDOCK_API_TOKEN" -X POST http://host:8080/api/c
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
 | `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
 | `UPDOCK_API_TOKEN` | empty | Bearer token for `/api/*` and `/metrics` (scripts, webhooks, Prometheus) |
+| `UPDOCK_AUTH_HEADER` / `UPDOCK_TRUSTED_PROXIES` / `UPDOCK_AUTH_USERS` | empty | Reverse-proxy sign-in (see above) |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
 | `UPDOCK_METRICS_PUBLIC` | `false` | Serve `/metrics` without login |

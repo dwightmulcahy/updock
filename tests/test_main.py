@@ -48,7 +48,8 @@ def test_index(client):
 def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
-        "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {}}
+        "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {},
+        "user": None}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -553,3 +554,64 @@ def test_run_events_published(monkeypatch):
     monkeypatch.setattr(main.HUB, "publish", lambda kind, data: seen.append((kind, data)))
     main.up.on_run({"kind": "check", "total": 3})
     assert seen == [("run", {"run": {"kind": "check", "total": 3}, "last_run": main.up.last_run})]
+
+
+# ---------- reverse-proxy header auth ----------
+
+@pytest.fixture
+def proxied(up, monkeypatch):
+    monkeypatch.setattr(main, "AUTH_HEADER", "Remote-User")
+    monkeypatch.setattr(main, "TRUSTED_PROXIES", main.parse_networks("10.0.0.0/24, ::1"))
+    monkeypatch.setattr(main, "AUTH_USERS", set())
+
+    def make(host):
+        return TestClient(main.app, client=(host, 1234))
+    return make
+
+
+def test_proxy_header_signs_in(proxied, up):
+    with proxied("10.0.0.5") as c:
+        r = c.get("/api/containers", headers={"Remote-User": "alice"})
+        assert r.status_code == 200 and r.json()["user"] == "alice"
+        r = c.get("/api/containers")
+        assert r.status_code == 401 and "Remote-User" in r.json()["detail"]
+        assert c.get("/livez").status_code == 200
+
+
+def test_proxy_header_allowlist(proxied, monkeypatch):
+    monkeypatch.setattr(main, "AUTH_USERS", {"alice"})
+    with proxied("10.0.0.5") as c:
+        assert c.get("/", headers={"Remote-User": "alice"}).status_code == 200
+        assert c.get("/", headers={"Remote-User": "mallory"}).status_code == 401
+
+
+def test_proxy_header_ignored_from_untrusted_peer(proxied, monkeypatch):
+    with proxied("192.168.1.9") as c:  # no password: direct access is refused
+        r = c.get("/api/containers", headers={"Remote-User": "alice"})
+        assert r.status_code == 401 and "reverse proxy" in r.json()["detail"]
+    monkeypatch.setattr(main, "UI_PASS", "secret")
+    with proxied("192.168.1.9") as c:  # with a password: Basic auth still works
+        assert c.get("/", headers={"Remote-User": "alice"}).status_code == 401
+        r = c.get("/api/containers", headers=_auth("admin", "secret"))
+        assert r.status_code == 200 and r.json()["user"] is None
+    with proxied("not-an-ip") as c:
+        assert c.get("/", headers={"Remote-User": "alice"}).status_code == 401
+
+
+def test_proxy_header_needs_trusted_proxies(up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "AUTH_HEADER", "Remote-User")
+    monkeypatch.setattr(main, "TRUSTED_PROXIES", [])
+    with TestClient(main.app, client=("10.0.0.5", 1)) as c:
+        r = c.get("/api/containers", headers={"Remote-User": "alice"})
+        assert r.status_code == 200 and r.json()["user"] is None  # no password, header ignored
+    with caplog.at_level("ERROR", logger="updock"):
+        main.check_auth_config()
+    assert "TRUSTED_PROXIES is empty" in caplog.text
+
+
+def test_parse_networks(caplog):
+    with caplog.at_level("ERROR", logger="updock"):
+        nets = main.parse_networks(" 10.1.2.3 , bogus, fd00::/8,")
+    assert [str(n) for n in nets] == ["10.1.2.3/32", "fd00::/8"]
+    assert "bogus" in caplog.text
+    main.check_auth_config()  # header auth off: nothing to report
