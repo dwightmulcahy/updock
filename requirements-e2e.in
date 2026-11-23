@@ -1,0 +1,6 @@
+# Browser (end-to-end) test dependencies. Recompile with:
+#   pip-compile --allow-unsafe --generate-hashes --strip-extras requirements-e2e.in
+-c requirements.txt
+-r requirements.in
+pytest>=9.2.0
+playwright>=1.50

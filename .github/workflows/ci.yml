@@ -76,6 +76,23 @@ jobs:
           pyflakes app scripts tests
       - run: python -m pytest -q
 
+  e2e:
+    name: Browser tests (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-e2e.txt
+      - run: pip install -r requirements-e2e.txt
+      - name: Install Chromium
+        run: |
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; sleep $((i * 10)); done
+      - name: Run browser tests
+        run: python -m pytest e2e -q -p no:cacheprovider -o addopts=""
+
   docker-smoke:
     name: Docker image + smoke
     runs-on: ubuntu-latest
