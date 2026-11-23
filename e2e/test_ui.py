@@ -142,3 +142,14 @@ def test_tabs_and_about(page, up):
     page.get_by_role("button", name="Show logs").click()
     expect(page.locator("#tab-logs")).to_be_visible()
     assert page.url.endswith("#logs")
+
+
+def test_status_icon_and_check_after_update(page, up):
+    up.check_only("web")
+    page.reload()
+    expect(row(page, "web").locator(".sicon.up")).to_have_attribute("title", "update available")
+    expect(page.locator("thead th")).to_have_count(4)
+    up.update("web")  # an updated container is on the latest version: show the check mark
+    page.reload()
+    expect(row(page, "web").locator(".sicon.ok")).to_have_attribute("title", "updated")
+    expect(row(page, "web").locator(".ver .same")).to_be_visible()
