@@ -107,3 +107,20 @@ def test_mobile_layout_fits_screen(browser, server, up):
     assert p.evaluate("document.documentElement.scrollWidth") <= 390
     expect(p.locator('tr.row[data-name="web"]').get_by_role("button", name="Check")).to_be_in_viewport()
     ctx.close()
+
+
+def test_header_and_table_header_stay_put(browser, server, up):
+    for i in range(40):  # enough rows to scroll
+        c = dict(up.d.ctrs["db"], Name=f"/extra{i}", Id=f"{i:064d}")
+        up.d.ctrs[f"extra{i}"] = c
+    ctx = browser.new_context(viewport={"width": 1200, "height": 600})
+    p = ctx.new_page()
+    p.goto(server)
+    p.wait_for_selector('tr.row[data-name="extra39"]')
+    p.evaluate("window.scrollTo(0, 1500)")
+    assert p.evaluate("window.scrollY") > 500
+    top = p.evaluate("document.getElementById('top').getBoundingClientRect().top")
+    th = p.evaluate("document.querySelector('thead th').getBoundingClientRect().top")
+    height = p.evaluate("document.getElementById('top').offsetHeight")
+    assert top == 0 and abs(th - height) <= 1
+    ctx.close()
