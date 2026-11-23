@@ -553,6 +553,50 @@ class Updater:
             self._set(name, step=None, health_until=None)
             lock.release()
 
+    def delete(self, name, remove_image=False, remove_volumes=False):
+        """Stop and remove a container; optionally its anonymous volumes (named volumes
+        are never touched) and its image if no other container uses it."""
+        done = {}
+
+        def job():
+            self.state[name]["action"] = "delete"
+            ctr = self.d.inspect(name)
+            labels = ctr["Config"].get("Labels") or {}
+            if labels.get(SELF_LABEL) == "true" or (self.self_id and ctr["Id"].startswith(self.self_id)):
+                raise RuntimeError("Updock won't delete its own container")
+            self._set(name, job="deleting", message=f"Removing {name}")
+            if ctr["State"].get("Running"):
+                self.d.stop(ctr["Id"], ctr["Config"].get("StopTimeout") or 10)
+            self.d.remove(ctr["Id"], volumes=remove_volumes)
+            extra = [" and its anonymous volumes" if remove_volumes else ""]
+            if remove_image:
+                users = sorted(c["Names"][0].lstrip("/") for c in self.d.containers(all=True)
+                               if c["ImageID"] == ctr["Image"])
+                if users:
+                    extra.append(f"; image kept (still used by {', '.join(users)})")
+                else:
+                    ref = ctr["Config"]["Image"]
+                    try:  # by tag: the image itself goes once no other tag points to it
+                        self.d.remove_image(ref if split_ref(ref)[1] is not None else ctr["Image"])
+                        extra.append(f" and image {ref}")
+                    except DockerError as e:
+                        extra.append(f"; image kept ({e})")
+            done["msg"] = f"deleted container {name}{''.join(extra)}"
+        self._locked(name, job)
+        if done:
+            self.state.pop(name, None)
+            self.queue.discard(name)
+            self._unpulled.discard(name)
+            if self.store:
+                self.store.save_state({n: dict(st) for n, st in self.state.items()})
+            self._log(done["msg"], logging.WARNING, name, "delete")
+            self.notifier.notify("delete", name, done["msg"])
+            if self.on_change:
+                try:
+                    self.on_change(name, {"deleted": True})
+                except Exception:
+                    pass
+
     def update(self, name, force=False, scheduled=False, override_cooldown=False):
         """Update one container. The cooldown applies to manual updates too unless
         `override_cooldown` (the UI asks for confirmation, plus the admin password if set)."""

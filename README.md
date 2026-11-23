@@ -162,6 +162,10 @@ For every container the UI shows the **running** image and, after a check, the *
 
 **Roll back to …** (row menu, or `POST /api/containers/{name}/rollback`) returns a container to the image it ran before its last update or version deploy — also after a `latest` update, where there is no older tag to pick. If old-image cleanup already deleted that image, it is pulled back from the registry by its digest. The container is then **pinned** so scheduled runs don't re-apply the newer image; unpin it when a fixed release is out. Rolling back again returns to the newer image.
 
+### Deleting a container
+
+**Delete container…** (row menu) stops and removes a container. You type its name to confirm and, when `UPDOCK_PASSWORD` is set, enter the admin password; you can also delete its image (only if no other container uses it) and its anonymous volumes — named volumes and bind mounts are never touched. Compose-managed containers come back on the next `docker compose up` unless removed from the compose file, and the dialog says so. Updock refuses to delete itself. Every deletion and refused attempt is logged (and emailed if `delete` is in `UPDOCK_NOTIFY_EVENTS`). API: `POST /api/containers/{name}/delete` with `{"remove_image": false, "remove_volumes": false, "password": "…"}` (an API token counts as admin). Turn the feature off with `UPDOCK_ALLOW_DELETE=false`.
+
 ### Following version tags (semver)
 
 A container on a version tag (`app:1.4.2`) only gets rebuilds of that same tag. Add the label `updock.semver` to move it to newer version tags instead:
@@ -221,7 +225,7 @@ Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks
 | `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
 | `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
 | `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
-| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,disk` | Also: `deploy` |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,disk` | Also: `deploy`, `delete` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
@@ -311,6 +315,7 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_STARTUP_GRACE` | `10` | Seconds a container without a healthcheck must stay up; `0` = only check it started |
 | `UPDOCK_API_TOKEN` | empty | Bearer token for `/api/*` and `/metrics` (scripts, webhooks, Prometheus) |
 | `UPDOCK_AUTH_HEADER` / `UPDOCK_TRUSTED_PROXIES` / `UPDOCK_AUTH_USERS` | empty | Reverse-proxy sign-in (see above) |
+| `UPDOCK_ALLOW_DELETE` | `true` | Allow **Delete container…** in the UI/API |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
 | `UPDOCK_METRICS_PUBLIC` | `false` | Serve `/metrics` without login |

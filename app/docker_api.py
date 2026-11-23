@@ -228,8 +228,9 @@ class Docker:
         self._req("POST", f"/networks/{quote(net)}/connect",
                   json={"Container": cid, "EndpointConfig": cfg})
 
-    def remove(self, cid):
-        self._req("DELETE", f"/containers/{cid}", params={"force": 1})
+    def remove(self, cid, volumes=False):
+        """Force-remove a container; `volumes` also removes its anonymous volumes."""
+        self._req("DELETE", f"/containers/{cid}", params={"force": 1, "v": int(volumes)})
 
     def exec_run(self, cid, cmd, timeout=60, max_output=65536):
         """Run `cmd` in a running container; return (exit_code, combined output).
