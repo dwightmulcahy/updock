@@ -25,6 +25,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: TEMP list cosign tags
+        run: |
+          T=$(curl -s "https://ghcr.io/token?scope=repository:sigstore/cosign/cosign:pull" | jq -r .token)
+          url="https://ghcr.io/v2/sigstore/cosign/cosign/tags/list?n=1000"; : > tags
+          for i in $(seq 1 30); do
+            curl -s -D h -H "Authorization: Bearer $T" "$url" | jq -r '.tags[]?' >> tags
+            nxt=$(grep -i '^link:' h | sed -E 's/.*<([^>]+)>.*/\1/' | tr -d '\r'); [ -z "$nxt" ] && break
+            url="https://ghcr.io$nxt"
+          done
+          grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' tags | sort -V | tail -6
+          t=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' tags | sort -V | tail -1)
+          docker buildx imagetools inspect ghcr.io/sigstore/cosign/cosign:$t | head -4
       - run: cp .env.example .env
       - run: docker compose -f compose.yaml config --quiet
       - run: docker compose -f compose.qnap.yaml config --quiet
