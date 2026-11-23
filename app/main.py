@@ -62,6 +62,8 @@ ENV = load_env()  # UPDOCK_*_FILE -> value (Compose secrets in ./secrets)
 UI_PASS = ENV["UPDOCK_PASSWORD"]
 VERSION = os.getenv("APP_VERSION") or "dev"
 COMMIT = os.getenv("GIT_SHA", "")[:7]
+BUILD_DATE = os.getenv("BUILD_DATE", "") or None
+STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 def init_store(directory, buf):
     """Open the data dir; replay saved logs into the buffer and persist new ones."""
@@ -489,6 +491,16 @@ def auth_mode():
     if AUTH_HEADER and TRUSTED_PROXIES:
         return f"reverse proxy ({AUTH_HEADER})" + (" + password" if UI_PASS else "")
     return "password" if UI_PASS else "none"
+
+
+@app.get("/api/build-info")
+def build_info():
+    """Details for the dialog opened by clicking the version in the header."""
+    sha = os.getenv("GIT_SHA") or None
+    return {"version": VERSION, "commit": sha[:12] if sha else None, "build_date": BUILD_DATE,
+            "python": platform.python_version(),
+            "platform": f"{platform.system()} {platform.machine()}".strip(),
+            "started_at": STARTED_AT}
 
 
 @app.get("/api/about")

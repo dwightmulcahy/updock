@@ -647,3 +647,13 @@ def test_auth_mode(monkeypatch):
     assert main.auth_mode() == "reverse proxy (Remote-User)"
     monkeypatch.setattr(main, "UI_PASS", "x")
     assert main.auth_mode() == "reverse proxy (Remote-User) + password"
+
+
+def test_build_info(client, monkeypatch):
+    monkeypatch.setenv("GIT_SHA", "0123456789abcdef")
+    monkeypatch.setattr(main, "BUILD_DATE", "2026-11-23T17:00:00Z")
+    b = client.get("/api/build-info").json()
+    assert b["commit"] == "0123456789ab" and b["build_date"] == "2026-11-23T17:00:00Z"
+    assert b["python"] and b["platform"] and b["started_at"].endswith("Z")
+    monkeypatch.delenv("GIT_SHA")
+    assert client.get("/api/build-info").json()["commit"] is None

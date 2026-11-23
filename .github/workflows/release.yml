@@ -96,6 +96,8 @@ jobs:
           registry: ${{ needs.verify.outputs.registry }}
           username: ${{ needs.verify.outputs.registry == 'ghcr.io' && github.actor || vars.DOCKERHUB_USERNAME }}
           password: ${{ needs.verify.outputs.registry == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.DOCKERHUB_TOKEN }}
+      - id: built
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -116,6 +118,7 @@ jobs:
           build-args: |
             APP_VERSION=${{ needs.verify.outputs.version }}
             GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ steps.built.outputs.date }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
