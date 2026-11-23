@@ -29,6 +29,11 @@
   td { overflow:hidden; }
   td { vertical-align:top; }
   tr.row { cursor:pointer; }
+  tr.grp td { background:#ffffff08; border-top:1px solid var(--line); padding:6px 10px; font-size:13px; }
+  tr.grp .gname { font-weight:600; } tr.grp .gmeta { color:var(--dim); margin-left:8px; font-size:12px; }
+  tr.grp .actions button { padding:2px 9px; font-size:12px; }
+  tr.ingrp td:first-child { padding-left:22px; }
+  label.grp { display:inline-flex; align-items:center; gap:4px; margin-left:10px; cursor:pointer; white-space:nowrap; }
   tr.row:hover td { background:#ffffff05; }
   .nm { font-weight:600; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
   .nm .chev { color:var(--dim); font-size:11px; width:10px; display:inline-block; transition:transform .15s; }
@@ -154,6 +159,7 @@
         <option value="checked">Last checked</option>
         <option value="updated">Recently updated</option>
       </select>
+      <label class="meta grp"><input type="checkbox" id="group"> Group by project</label>
     </div>
   </div>
   <table>
@@ -279,7 +285,7 @@ const FILTERS = {
   excluded: ["Excluded", c => !c.eligible],
 };
 const UI_KEY = "updock.view";
-let view = { q: "", filter: "all", sort: "attention" };
+let view = { q: "", filter: "all", sort: "attention", group: false };
 try { view = { ...view, ...JSON.parse(localStorage.getItem(UI_KEY) || "{}") }; } catch (e) {}
 const saveView = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(view)); } catch (e) {} };
 
@@ -347,6 +353,7 @@ function detailRow(c) {
     <div><h4>Running</h4><div class="img">${esc(c.image)}</div>${cur}</div>
     <div><h4>Latest available</h4>${lat}</div>
     <div><h4>Container</h4><div class="img">${stateLine(c)}</div>
+      ${c.project ? `<div class="img">Compose: ${esc(c.project)} / ${esc(c.service || "?")}</div>` : ""}
       <div class="img">last check ${ago(c.last_check)}${c.last_update ? ` · last update ${ago(c.last_update)}` : ""}</div>
       ${flags.map(f => `<div class="img">${esc(f)}</div>`).join("")}</div>
     ${c.message ? `<div class="dfull ${PROBLEM.has(c.job) ? "err" : ""}">${esc(c.message)}</div>` : ""}
@@ -377,11 +384,30 @@ function render() {
   const rows = DATA.filter(FILTERS[view.filter][1])
     .filter(c => !q || c.name.toLowerCase().includes(q) || (c.image || "").toLowerCase().includes(q))
     .sort(SORTS[view.sort] || SORTS.attention);
-  $("rows").innerHTML = rows.map(c => {
+  let html;
+  if (view.group) {
+    const groups = new Map();
+    for (const c of rows) { const k = c.project || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); }
+    const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+    html = keys.map(k => groupRow(k, groups.get(k)) + groups.get(k).map(c => rowHtml(c, !!k)).join("")).join("");
+  } else html = rows.map(c => rowHtml(c, false)).join("");
+  $("rows").innerHTML = html || `<tr><td colspan="5" class="empty">${DATA.length ? "No containers match this filter." : "Loading…"}</td></tr>`;
+}
+function groupRow(project, list) {
+  if (!project) return `<tr class="grp"><td colspan="5"><span class="gname">Not in a Compose project</span><span class="gmeta">${list.length}</span></td></tr>`;
+  const all = DATA.filter(c => c.project === project && c.eligible);
+  const ups = all.filter(c => c.update_available).length, p = esc(JSON.stringify(project));
+  const dis = (RUN || optimistic || all.some(c => busy(c.job))) ? "disabled" : "";
+  return `<tr class="grp"><td colspan="4"><span class="gname">${esc(project)}</span><span class="gmeta">${list.length} container${list.length === 1 ? "" : "s"}${ups ? ` · ${ups} update${ups === 1 ? "" : "s"} available` : ""}</span></td>
+    <td><div class="actions">${all.length ? `<button ${dis} title="Check every container of ${esc(project)}" onclick='startRun("check", ${p})'>Check</button>
+    <button ${dis} class="${ups ? "primary" : ""}" title="Update ${esc(project)} in dependency order" onclick='startRun("update", ${p})'>Update</button>` : ""}</div></td></tr>`;
+}
+function rowHtml(c, inGroup) {
+  {
     const st = statusText(c), open = OPEN.has(c.name);
     const badges = (c.pinned ? ' <span class="badge pinned-badge">pinned</span>' : "") +
                    (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "");
-    return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
+    return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""} ${inGroup ? "ingrp" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
       <td><div class="nm"><span class="chev">▶</span>${esc(c.name)}${badges}</div>
           <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div></td>
       <td>${versionCell(c)}</td>
@@ -392,7 +418,7 @@ function render() {
       <td class="t-chk meta">${ago(c.last_check)}</td>
       <td><div class="actions">${primaryAction(c)}<button class="more" title="More actions" aria-label="More actions for ${esc(c.name)}" onclick="event.stopPropagation();rowMenu(event, this.closest('tr').dataset.name)">⋯</button></div></td>
     </tr>${open ? detailRow(c) : ""}`;
-  }).join("") || `<tr><td colspan="5" class="empty">${DATA.length ? "No containers match this filter." : "Loading…"}</td></tr>`;
+  }
 }
 function toggleRow(name) { OPEN.has(name) ? OPEN.delete(name) : OPEN.add(name); render(); }
 function setFilter(k) { view.filter = k; saveView(); render(); }
@@ -450,7 +476,7 @@ function renderRun() {
     const pct = active.total ? Math.round(100 * active.done / active.total) : 0;
     const verb = active.kind === "update" ? "Updating" : "Checking";
     bar.className = ""; bar.hidden = false;
-    bar.innerHTML = `<span class="spin"></span><span class="rb-text">${verb} containers ` +
+    bar.innerHTML = `<span class="spin"></span><span class="rb-text">${verb} ${active.project ? `project <b>${esc(active.project)}</b>` : "containers"} ` +
       (active.total ? `${active.done + (active.current ? 1 : 0) > active.total ? active.total : active.done + (active.current ? 1 : 0)} of ${active.total}` : "…") +
       (active.current ? ` · <span class="rb-cur">${esc(active.current)}</span>` : "") +
       ` · <span data-since="${active.started}">${mmss(Date.now() / 1000 - active.started)}</span></span>` +
@@ -470,10 +496,12 @@ function renderRun() {
   }
   bar.hidden = true;
 }
-async function startRun(kind) {
-  optimistic = { kind, total: 0, done: 0, current: null, started: Date.now() / 1000 };
+async function startRun(kind, project) {
+  optimistic = { kind, project, total: 0, done: 0, current: null, started: Date.now() / 1000 };
   renderRun();
-  const r = await fetch(kind === "update" ? "/api/update-all" : "/api/check-all",
+  const url = project ? `/api/projects/${encodeURIComponent(project)}/${kind}`
+                      : kind === "update" ? "/api/update-all" : "/api/check-all";
+  const r = await fetch(url,
                         { method: "POST", headers: { "X-Updock-Request": "1" } });
   if (!r.ok) { const d = await r.json().catch(() => ({})); if (r.status !== 409) alert(d.detail || `Failed (${r.status})`); }
   setTimeout(() => { optimistic = null; renderRun(); }, 1500);
@@ -658,7 +686,8 @@ function connectEvents() {
   es.onerror = () => { live = false; };  // EventSource reconnects by itself
 }
 connectEvents();
-$("q").value = view.q; $("sort").value = view.sort;
+$("q").value = view.q; $("sort").value = view.sort; $("group").checked = !!view.group;
+$("group").addEventListener("change", () => { view.group = $("group").checked; saveView(); render(); });
 $("q").addEventListener("input", () => { view.q = $("q").value.trim(); saveView(); render(); });
 $("sort").addEventListener("change", () => { view.sort = $("sort").value; saveView(); render(); });
 refresh();

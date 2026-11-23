@@ -2278,3 +2278,23 @@ def test_http_probe(monkeypatch):
     monkeypatch.setattr(mod.httpx, "get", get)
     assert mod.http_probe("http://x/", 5) == 204
     assert seen == {"url": "http://x/", "timeout": 5, "follow_redirects": False, "trust_env": False}
+
+
+# ---------- per-project runs ----------
+
+def test_run_all_limited_to_project(fake, monkeypatch):
+    u = Updater(fake)
+    compose_ctr(fake, "web", "web", "db:service_started")
+    compose_ctr(fake, "db", "db")
+    compose_ctr(fake, "other", "app", project="blog")
+    fake.add(make_ctr("solo", cid="s" * 64))
+    seen = []
+    monkeypatch.setattr(u, "update", lambda n, scheduled=False: seen.append(n))
+    u.run_all(project="proj")
+    assert seen == ["db", "web"]
+    assert u.last_run["project"] == "proj" and u.last_run["total"] == 2
+    assert any("project proj" in e["msg"] for e in u.logs)
+    assert u.projects() == ["blog", "proj"]
+    rows = {r["name"]: r for r in u.list()}
+    assert rows["web"]["project"] == "proj" and rows["web"]["service"] == "web"
+    assert rows["solo"]["project"] is None

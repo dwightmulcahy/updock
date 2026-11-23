@@ -322,6 +322,8 @@ class Updater:
                    "monitor_only": str((c.get("Labels") or {}).get(MONITOR_ONLY_LABEL, "")).lower()
                    in TRUE,
                    "current": self._image_info(c["ImageID"]), "queued": name in self.queue,
+                   "project": (c.get("Labels") or {}).get(COMPOSE_PROJECT),
+                   "service": (c.get("Labels") or {}).get(COMPOSE_SERVICE),
                    **st}
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
             for key in ("current", "latest"):
@@ -1209,15 +1211,24 @@ class Updater:
             except Exception:  # the banner must never break a run
                 pass
 
-    def run_all(self, update=True):
+    def projects(self):
+        """Compose project names of the containers Updock can see."""
+        return sorted({(c.get("Labels") or {}).get(COMPOSE_PROJECT)
+                       for c in self.d.containers(all=True)} - {None, ""})
+
+    def run_all(self, update=True, project=None):
+        """Check (or update) every eligible container, Compose dependencies first.
+        `project` limits the run to one Compose project."""
         if self.run:
             self._log("a run is already in progress; request ignored", logging.WARNING,
                       event="run")
             return False
         t0 = time.monotonic()
         self.counters["runs"] += 1
-        self._log(f"run started ({'update' if update else 'check only'})", event="run")
-        self.run = {"kind": "update" if update else "check", "total": 0, "done": 0,
+        self._log(f"run started ({'update' if update else 'check only'}"
+                  f"{f', project {project}' if project else ''})", event="run")
+        self.run = {"kind": "update" if update else "check", "project": project,
+                    "total": 0, "done": 0,
                     "current": None, "started": time.time(), "results": Counter()}
         self._publish_run()
         try:
@@ -1226,7 +1237,9 @@ class Updater:
                     update = False
                     self.run["kind"] = "check"
                 targets = [c for c in compose_order(self.d.containers(all=self.include_stopped))
-                           if self.eligible(c)]
+                           if self.eligible(c) and (project is None or
+                                                    (c.get("Labels") or {}).get(COMPOSE_PROJECT)
+                                                    == project)]
                 self.queue = {c["Names"][0].lstrip("/") for c in targets}
                 self.run["total"] = len(targets)
                 self._publish_run()
@@ -1251,7 +1264,8 @@ class Updater:
         finally:
             summary = self.run_status()
             self.last_run = {"t": time.time(), "duration": time.monotonic() - t0,
-                             "kind": summary["kind"], "total": summary["total"],
+                             "kind": summary["kind"], "project": project,
+                             "total": summary["total"],
                              "results": summary["results"]}
             self.run, self.queue = None, set()
             self._publish_run()

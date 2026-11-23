@@ -267,6 +267,18 @@ def test_rollback_endpoint(client, up):
     up.rollback.assert_called_with("web")
 
 
+def test_project_run_endpoint(client, up):
+    up.projects.return_value = ["proj"]
+    assert client.post("/api/projects/proj/update").status_code == 202
+    up.run_all.assert_called_with(True, "proj")
+    assert client.post("/api/projects/proj/check").status_code == 202
+    up.run_all.assert_called_with(False, "proj")
+    assert client.post("/api/projects/nope/check").status_code == 404
+    assert client.post("/api/projects/proj/delete").status_code == 404
+    up.run = {"kind": "check"}
+    assert client.post("/api/projects/proj/update").status_code == 409
+
+
 # ---------- CSRF / security headers ----------
 
 SAME = {"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin", "X-Updock-Request": "1"}
