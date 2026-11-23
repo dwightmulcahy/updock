@@ -148,7 +148,8 @@ jobs:
           # auth enforced
           test "$(curl -s -o /dev/null -w '%{http_code}' "$base/api/containers")" = 401
           # UI served
-          curl -fsS -u admin:ci-secret "$base/" | grep -q "<title>Updock</title>"
+          # to a file: with pipefail, grep -q exiting early makes curl fail (error 23)
+          curl -fsS -u admin:ci-secret "$base/" -o page.html && grep -q "<title>Updock</title>" page.html
           # Docker socket reachable with all capabilities dropped; updock lists itself as excluded
           curl -fsS -u admin:ci-secret "$base/api/containers" | tee containers.json
           python3 -c "import json; c=json.load(open('containers.json'))['containers']; assert any(x['name']=='app' and not x['eligible'] for x in c), c"
@@ -252,7 +253,7 @@ jobs:
           curl -fsS -H "$auth" "$base/api/logs?container=proxy-target" | python3 -c \
             "import json,sys; [print(e['level'], e['msg']) for e in json.load(sys.stdin)['entries']]"
           [ "$ok" = 1 ] || { echo "::error::recreate through the proxy failed"; exit 1; }
-          curl -fsS -H "$auth" "$base/api/logs?container=proxy-target&event=hook" | grep -q 'exited 0: hook-ran'
+          curl -fsS -H "$auth" "$base/api/logs?container=proxy-target&event=hook" -o hook.log && grep -q 'exited 0: hook-ran' hook.log
           curl -fsS -H "$auth" "$base/api/disk" | python3 -c \
             "import json,sys; d=json.load(sys.stdin); print(d); sys.exit(0 if d['enabled'] and d['used'] > 0 else 1)"
       - name: Scan image for fixable high and critical vulnerabilities
