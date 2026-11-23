@@ -16,6 +16,9 @@ RUN python -m pip uninstall -y pip setuptools wheel
 # Files owned by root and the root filesystem is read-only at runtime (see compose.yaml).
 # Runs as root only to reach the Docker socket; all capabilities are dropped.
 COPY app ./app
+# Last so a new date doesn't invalidate the cached dependency layers
+ARG BUILD_DATE=
+ENV BUILD_DATE=${BUILD_DATE}
 # State and log history (mount a volume here)
 RUN mkdir -p /data
 ENV UPDOCK_DATA_DIR=/data

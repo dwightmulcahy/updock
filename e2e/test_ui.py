@@ -153,3 +153,13 @@ def test_status_icon_and_check_after_update(page, up):
     page.reload()
     expect(row(page, "web").locator(".sicon.ok")).to_have_attribute("title", "updated")
     expect(row(page, "web").locator(".ver .same")).to_be_visible()
+
+
+def test_version_opens_build_info(page):
+    page.click("#ver")
+    dlg = page.locator("#bdlg")
+    expect(dlg).to_be_visible()
+    expect(dlg.locator("#blist")).to_contain_text("Server started")
+    expect(dlg.locator("#blist")).to_contain_text("Python")
+    page.keyboard.press("Escape")
+    expect(dlg).to_be_hidden()
