@@ -8,6 +8,8 @@ import threading
 import time
 from collections import Counter, defaultdict
 
+import httpx
+
 from .changelog import TEMPLATE_LABEL, changelog_url, source_of
 from .docker_api import DockerError, split_ref
 from .logs import LogBuffer
@@ -24,6 +26,7 @@ SCOPE_LABEL = "updock.scope"
 MONITOR_ONLY_LABEL = "updock.monitor-only"
 REVIVE_LABEL = "updock.revive"
 HEALTH_TIMEOUT_LABEL = "updock.health-timeout"
+HEALTH_URL_LABEL = "updock.health-url"
 TRUE = {"1", "true", "yes", "on"}
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
@@ -177,6 +180,11 @@ def image_info(img):
     }
 
 
+def http_probe(url, timeout):
+    """GET url and return the status code (redirects are not followed: 3xx counts as up)."""
+    return httpx.get(url, timeout=timeout, follow_redirects=False, trust_env=False).status_code
+
+
 def base_repo(ref):
     return split_ref(ref)[0].split("@", 1)[0]
 
@@ -186,7 +194,8 @@ class Updater:
                  health_timeout=120, startup_grace=0, sleep=time.sleep, clock=time.monotonic,
                  digest_check=True, notifier=None, store=None, include_stopped=False,
                  cooldown=0, hooks=False, disk_max=0, disk_warn=0, exclude_names=(),
-                 include_images=(), exclude_images=(), scope=None, revive_stopped=False):
+                 include_images=(), exclude_images=(), scope=None, revive_stopped=False,
+                 probe=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -215,6 +224,7 @@ class Updater:
         self.exclude_images = [p for p in exclude_images if p]
         self.scope = scope or None
         self.revive_stopped = revive_stopped
+        self.probe = probe or http_probe
         self._backoff = {}  # registry host -> {"until": ts, "hits": n}
         self.on_change = None  # callback(name, state) for live UI updates
         self.on_run = None     # callback(run status or None) for the UI's run banner
@@ -892,6 +902,8 @@ class Updater:
                 self._log("started", logging.DEBUG, name, "recreate")
                 self._verify(new_id, name, was_unhealthy=(
                     ((ctr["State"].get("Health") or {}).get("Status") == "unhealthy")))
+                if not network_parent:
+                    self._verify_url(new_id, name)
         except Exception as e:
             self._log(f"{e}; rolling back to previous container", logging.ERROR, name, "rollback")
             if new_id:
@@ -1026,6 +1038,42 @@ class Updater:
                 return
             self.sleep(min(2, max(0.1, deadline - self.clock())))
             info = self.d.inspect(cid)
+
+    def _verify_url(self, cid, name):
+        """Label updock.health-url: the app must answer that URL with a 2xx/3xx status
+        within the health timeout, or the update is rolled back. Requested by Updock
+        itself, so use an address Updock can reach (a published port, or the
+        container's name on a shared network)."""
+        info = self.d.inspect(cid)
+        url = ((info["Config"].get("Labels") or {}).get(HEALTH_URL_LABEL) or "").strip()
+        if not url:
+            return
+        if not url.lower().startswith(("http://", "https://")):
+            self._log(f"invalid {HEALTH_URL_LABEL}={url!r} (must be http:// or https://); "
+                      "not probing", logging.WARNING, name, "health")
+            return
+        limit = self.health_timeout_for(name, info)
+        deadline = self.clock() + limit
+        self._set(name, step="health", health_until=time.time() + limit,
+                  message=f"Waiting up to {limit}s for {url} to answer")
+        last = None
+        while True:
+            try:
+                code = self.probe(url, min(10, max(1, limit)))
+                if 200 <= code < 400:
+                    self._log(f"{url} answered {code}", container=name, event="health")
+                    return
+                last = f"HTTP {code}"
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            st = self.d.inspect(cid)["State"]
+            if not st.get("Running") or st.get("Restarting"):
+                raise UnhealthyError(f"new container exited (code {st.get('ExitCode')}) "
+                                     f"while waiting for {url}")
+            if self.clock() >= deadline:
+                raise UnhealthyError(f"{url} did not answer with 2xx/3xx within {limit}s "
+                                     f"(last: {last})")
+            self.sleep(min(2, max(0.1, deadline - self.clock())))
 
     def health_timeout_for(self, name, info):
         """Per-container label updock.health-timeout (e.g. 5m) overrides UPDOCK_HEALTH_TIMEOUT."""
