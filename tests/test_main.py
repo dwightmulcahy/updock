@@ -615,3 +615,35 @@ def test_parse_networks(caplog):
     assert [str(n) for n in nets] == ["10.1.2.3/32", "fd00::/8"]
     assert "bogus" in caplog.text
     main.check_auth_config()  # header auth off: nothing to report
+
+
+# ---------- about ----------
+
+def test_about(client, up, monkeypatch):
+    up.d.version.return_value = {"Version": "29.0.1", "ApiVersion": "1.52", "Os": "linux",
+                                 "Arch": "amd64"}
+    for k, v in dict(cleanup=True, digest_check=True, label_enable=False, include_stopped=False,
+                     revive_stopped=False, health_timeout=120, startup_grace=10, cooldown=0,
+                     hooks=False, scope=None).items():
+        setattr(up, k, v)
+    monkeypatch.setenv("DOCKER_HOST", "tcp://user:pw@socket-proxy:2375")
+    monkeypatch.setattr(main, "UI_PASS", "x")
+    a = client.get("/api/about", headers=_auth("admin", "x")).json()
+    assert a["engine"] == {"version": "29.0.1", "api": "1.52", "os": "linux", "arch": "amd64"}
+    assert a["docker_host"] == "tcp://socket-proxy:2375"  # credentials never shown
+    assert a["auth"] == "password" and a["settings"]["health_timeout"] == 120
+    up.d.version.side_effect = RuntimeError("proxy says no")
+    monkeypatch.setenv("DOCKER_HOST", "unix")
+    a = client.get("/api/about", headers=_auth("admin", "x")).json()
+    assert a["engine"] == {"error": "proxy says no"} and a["docker_host"] == "unix://unix"
+
+
+def test_auth_mode(monkeypatch):
+    monkeypatch.setattr(main, "UI_PASS", "")
+    monkeypatch.setattr(main, "AUTH_HEADER", "")
+    assert main.auth_mode() == "none"
+    monkeypatch.setattr(main, "AUTH_HEADER", "Remote-User")
+    monkeypatch.setattr(main, "TRUSTED_PROXIES", main.parse_networks("10.0.0.1"))
+    assert main.auth_mode() == "reverse proxy (Remote-User)"
+    monkeypatch.setattr(main, "UI_PASS", "x")
+    assert main.auth_mode() == "reverse proxy (Remote-User) + password"

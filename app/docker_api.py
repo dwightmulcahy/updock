@@ -158,6 +158,10 @@ class Docker:
             return r.json()
         return None
 
+    def version(self):
+        """Engine version info (GET /version)."""
+        return self._req("GET", "/version")
+
     def ping(self):
         r = self.c.get("/_ping", timeout=5)
         return r.status_code == 200

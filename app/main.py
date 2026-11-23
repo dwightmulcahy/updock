@@ -4,6 +4,7 @@ import random
 import re
 import logging
 import os
+import platform
 import secrets
 import threading
 import time
@@ -482,6 +483,38 @@ def remove_registry(host: str):
     if up.registry:
         up.registry.forget(key)
     return {"removed": display_host(key)}
+
+
+def auth_mode():
+    if AUTH_HEADER and TRUSTED_PROXIES:
+        return f"reverse proxy ({AUTH_HEADER})" + (" + password" if UI_PASS else "")
+    return "password" if UI_PASS else "none"
+
+
+@app.get("/api/about")
+def about():
+    """Build, engine and effective settings for the About tab (no secrets)."""
+    try:
+        v = up.d.version()
+        engine = {"version": v.get("Version"), "api": v.get("ApiVersion"),
+                  "os": v.get("Os"), "arch": v.get("Arch")}
+    except Exception as e:
+        engine = {"error": str(e)[:200]}
+    host = os.getenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    return {
+        "version": VERSION, "commit": COMMIT, "python": platform.python_version(),
+        "engine": engine, "docker_host": host.split("://", 1)[0] + "://" + (
+            host.split("://", 1)[1].split("@")[-1] if "://" in host else host),
+        "schedule": schedule_info(), "auto_update": AUTO_UPDATE,
+        "settings": {
+            "cleanup": up.cleanup, "digest_check": up.digest_check,
+            "label_enable": up.label_enable, "include_stopped": up.include_stopped,
+            "revive_stopped": up.revive_stopped, "health_timeout": up.health_timeout,
+            "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
+            "scope": up.scope},
+        "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
+        "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
+    }
 
 
 @app.get("/api/notify")
