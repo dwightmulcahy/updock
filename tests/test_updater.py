@@ -2313,3 +2313,66 @@ def test_run_all_limited_to_project(fake, monkeypatch):
     rows = {r["name"]: r for r in u.list()}
     assert rows["web"]["project"] == "proj" and rows["web"]["service"] == "web"
     assert rows["solo"]["project"] is None
+
+
+# ---------- delete ----------
+
+def test_delete_running_container_and_unused_image(fake):
+    fake.add(make_ctr())
+    events = []
+    u = Updater(fake)
+    u.on_change = lambda n, st: events.append(st)
+    u.state["web"]["job"] = "up-to-date"
+    u.delete("web", remove_image=True, remove_volumes=True)
+    assert "web" not in fake.ctrs and fake.stopped == [CID] and fake.removed == ["test/app:latest"]
+    assert fake.removed_volumes is True
+    assert "web" not in u.state and events[-1] == {"deleted": True}
+    msg = [e for e in u.logs if e["event"] == "delete"][-1]
+    assert msg["level"] == "WARNING" and "anonymous volumes and image test/app:latest" in msg["msg"]
+
+
+def test_delete_keeps_shared_image_and_reports_image_errors(fake):
+    fake.add(make_ctr())
+    fake.add(make_ctr("web2", cid="b" * 64))
+    u = Updater(fake)
+    u.delete("web", remove_image=True)
+    assert "image kept (still used by web2)" in u.logs[-1]["msg"]
+    fake.fail["remove_image"] = _DockerError(409, "conflict")
+    u.delete("web2", remove_image=True)
+    assert "image kept (" in u.logs[-1]["msg"] and "web2" not in fake.ctrs
+
+
+def test_delete_digest_pinned_image_by_id(fake):
+    fake.add(make_ctr(image="test/app@sha256:abc"))
+    u = Updater(fake)
+    u.delete("web", remove_image=True)
+    assert fake.removed == [OLD_IMG]
+
+
+def test_delete_stopped_without_image(fake):
+    c = make_ctr()
+    c["State"] = {"Running": False}
+    fake.add(c)
+    u = Updater(fake)
+    u.on_change = lambda n, st: 1 / 0  # a broken listener doesn't break deleting
+    u.delete("web")
+    assert "web" not in fake.ctrs and not getattr(fake, "stopped", []) and not getattr(fake, "removed", [])
+    assert u.logs[-1]["msg"] == "deleted container web"
+
+
+def test_delete_refuses_updock_itself(fake, monkeypatch):
+    monkeypatch.setenv("HOSTNAME", CID[:12])
+    fake.add(make_ctr())
+    u = Updater(fake)
+    u.delete("web")
+    assert "web" in fake.ctrs and u.state["web"]["job"] == "error"
+    assert "won't delete its own container" in u.state["web"]["message"]
+
+
+def test_delete_forgets_saved_state(fake, tmp_path):
+    from app.store import Store
+    fake.add(make_ctr())
+    u = Updater(fake, store=Store(str(tmp_path)))
+    u.state["web"]["pinned"] = True
+    u.delete("web")
+    assert "web" not in Updater(fake, store=Store(str(tmp_path))).state

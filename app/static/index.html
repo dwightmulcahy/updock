@@ -183,7 +183,9 @@
   #lmsg.err { color:var(--err); } #lmsg.ok { color:var(--ok); }
   #cmsg { color:var(--err); } button.danger { background:var(--err); color:#fff; }
   #cpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
-  #cpass[hidden] { display:none; }
+  #cpass[hidden], #dpass[hidden] { display:none; }
+  #dmsg { color:var(--err); }
+  #dname, #dpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
   @media (max-width: 640px) {
     header { padding:12px; gap:8px; } header h1 { flex-basis:100%; }
     main { padding:10px; }
@@ -295,6 +297,20 @@
   <div class="hd"><b id="btitle">Build info</b><button class="x" aria-label="Close" onclick="bdlg.close()">✕</button></div>
   <dl class="kv" id="blist"></dl>
   <div class="row"><button id="bcopy" onclick="copyBuildInfo()">Copy</button><button class="primary" onclick="bdlg.close()">Close</button></div>
+</dialog>
+<dialog id="ddlg" aria-labelledby="dtitle">
+  <b id="dtitle">Delete container?</b>
+  <p id="dtext" class="meta" style="max-width:460px;line-height:1.5"></p>
+  <form id="dform" onsubmit="deleteContainer(event)" style="display:grid;gap:8px">
+    <label class="meta"><input type="checkbox" id="dimage"> Also delete its image (only if no other container uses it)</label>
+    <label class="meta"><input type="checkbox" id="dvols"> Also delete its anonymous volumes (named volumes and bind mounts are never touched)</label>
+    <label class="meta" for="dname">Type <b id="dwant"></b> to confirm</label>
+    <input id="dname" autocomplete="off" spellcheck="false" required>
+    <input id="dpass" type="password" placeholder="Admin password" autocomplete="current-password" hidden>
+    <div class="meta" id="dmsg" role="status"></div>
+    <div class="row"><button type="button" onclick="ddlg.close()">Cancel</button>
+      <button class="primary danger" type="submit" id="dgo" disabled>Delete</button></div>
+  </form>
 </dialog>
 <dialog id="cdlg" aria-labelledby="ctitle">
   <b id="ctitle">Skip the cooldown?</b>
@@ -607,6 +623,7 @@ function rowMenu(ev, name) {
     { label: "Show logs", run: () => pickContainer(name) },
     ...(safeUrl(notes) ? [{ label: "Release notes ↗", run: () => open(notes, "_blank", "noopener") }] : []),
     ...(c.job === "auth-required" ? [{ label: "Add registry login…", run: () => openLogins(c.auth_host || "") }] : []),
+    ...(ALLOW_DELETE ? ["-", { label: "Delete container…", disabled: dis || c.excluded === "this is Updock", run: () => openDelete(name) }] : []),
   ]);
 }
 const THEMES = ["auto", "light", "dark"];
@@ -626,7 +643,7 @@ function headerMenu(ev) {
 }
 
 // ---------- run banner ----------
-let RUN = null, LAST = null, hideDone = 0, optimistic = null, GATE = "confirm";
+let RUN = null, LAST = null, hideDone = 0, optimistic = null, GATE = "confirm", ALLOW_DELETE = false;
 const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
   "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
   "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually", "unverified": "signature check failed" };
@@ -686,7 +703,7 @@ async function refresh() {
                 sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     if (d.user) nx.textContent += ` · ${d.user}`;
-    DATA = d.containers; GATE = d.cooldown_gate || "confirm";
+    DATA = d.containers; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
     RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;
     if (RUN) optimistic = null;
     renderRun();
@@ -956,6 +973,32 @@ async function overrideCooldown(ev) {
   if (r.status === 403) { $("cmsg").textContent = "Wrong admin password."; $("cpass").select(); return; }
   if (!r.ok) { const d = await r.json().catch(() => ({})); $("cmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
   $("cdlg").close(); setTimeout(refresh, 300);
+}
+
+// ---- deleting a container: type its name, plus the admin password when one is set ----
+let DEL_NAME = null;
+function openDelete(name) {
+  const c = DATA.find(x => x.name === name); if (!c) return;
+  DEL_NAME = name;
+  $("dtitle").textContent = `Delete ${name}?`;
+  $("dtext").textContent = `This ${c.state === "running" ? "stops and " : ""}removes the container ${name} (${c.image}). It can't be undone; its settings are lost.` +
+    (c.project ? ` It belongs to the Compose project "${c.project}": "docker compose up" will create it again unless you also remove it from the compose file.` : "");
+  $("dwant").textContent = name;
+  for (const id of ["dimage", "dvols"]) $(id).checked = false;
+  $("dname").value = ""; $("dgo").disabled = true; $("dmsg").textContent = "";
+  $("dpass").hidden = GATE !== "password"; $("dpass").required = GATE === "password"; $("dpass").value = "";
+  $("ddlg").showModal(); $("dname").focus();
+}
+$("dname").addEventListener("input", () => { $("dgo").disabled = $("dname").value !== DEL_NAME; });
+async function deleteContainer(ev) {
+  ev.preventDefault();
+  if ($("dname").value !== DEL_NAME) return;
+  const r = await fetch(`/api/containers/${encodeURIComponent(DEL_NAME)}/delete`, {
+    method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ remove_image: $("dimage").checked, remove_volumes: $("dvols").checked, password: $("dpass").value }) });
+  if (r.status === 403) { const d = await r.json().catch(() => ({})); $("dmsg").textContent = d.detail === "wrong admin password" ? "Wrong admin password." : (d.detail || "Not allowed."); return; }
+  if (!r.ok) { const d = await r.json().catch(() => ({})); $("dmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
+  OPEN.delete(DEL_NAME); $("ddlg").close(); setTimeout(refresh, 300);
 }
 </script>
 </body>

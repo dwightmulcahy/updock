@@ -211,3 +211,26 @@ def test_cooldown_needs_confirmation_and_password(page, up, monkeypatch):
     expect(dlg).to_be_hidden()
     expect(r).to_contain_text("updated", timeout=10000)
     assert up.d.ctrs["web"]["Image"] == "sha256:new"
+
+
+def test_delete_container_needs_name_and_password(page, up, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    page.context.set_extra_http_headers({"Authorization": "Basic YWRtaW46czNjcmV0"})
+    page.reload()
+    row(page, "web").locator("button.more").click()
+    page.get_by_role("button", name="Delete container…").click()
+    dlg = page.locator("#ddlg")
+    expect(dlg).to_contain_text('Compose project "shop"')
+    expect(page.locator("#dgo")).to_be_disabled()
+    page.fill("#dname", "web")
+    expect(page.locator("#dgo")).to_be_enabled()
+    page.fill("#dpass", "nope")
+    page.click("#dgo")
+    expect(page.locator("#dmsg")).to_have_text("Wrong admin password.")
+    assert "web" in up.d.ctrs
+    page.fill("#dpass", "s3cret")
+    page.click("#dgo")
+    expect(dlg).to_be_hidden()
+    expect(row(page, "web")).to_have_count(0, timeout=10000)
+    assert "web" not in up.d.ctrs

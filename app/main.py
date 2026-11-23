@@ -351,7 +351,7 @@ def containers(request: Request):
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
             "version": VERSION, "user": getattr(request.state, "user", None),
-            "cooldown_gate": cooldown_gate()}
+            "cooldown_gate": cooldown_gate(), "allow_delete": ALLOW_DELETE}
 
 
 def _log_query(level, container, event, q, after, since, limit):
@@ -389,6 +389,15 @@ class UpdateRequest(BaseModel):
     password: str = ""
 
 
+ALLOW_DELETE = env_bool("UPDOCK_ALLOW_DELETE", True)
+
+
+def admin_ok(request, password):
+    """Gate for risky actions: the admin password when one is set (an API token counts)."""
+    return (not UI_PASS or getattr(request.state, "token", False)
+            or secrets.compare_digest((password or "").encode(), UI_PASS.encode()))
+
+
 def cooldown_gate():
     """What the UI must ask before skipping a cooldown: the admin password when one is
     set, otherwise just a confirmation."""
@@ -398,8 +407,7 @@ def cooldown_gate():
 @app.post("/api/containers/{name}/update")
 def update(name: str, request: Request, force: bool = False, body: UpdateRequest | None = None):
     override = bool(body and body.override_cooldown)
-    if override and UI_PASS and not getattr(request.state, "token", False) \
-            and not secrets.compare_digest(body.password.encode(), UI_PASS.encode()):
+    if override and not admin_ok(request, body.password):
         logging.getLogger("updock").warning("%s: cooldown override refused (wrong admin password)",
                                             name, extra={"container": name, "event": "security"})
         raise HTTPException(403, "wrong admin password")
@@ -409,6 +417,32 @@ def update(name: str, request: Request, force: bool = False, body: UpdateRequest
                                             extra={"container": name, "event": "cooldown"})
         return bg(up.update, name, force, False, True)
     return bg(up.update, name, force)
+
+
+class DeleteRequest(BaseModel):
+    remove_image: bool = False
+    remove_volumes: bool = False
+    password: str = ""
+
+
+@app.post("/api/containers/{name}/delete")
+def delete(name: str, request: Request, body: DeleteRequest | None = None):
+    """Stop and remove a container (admin password required when one is set)."""
+    body = body or DeleteRequest()
+    if not ALLOW_DELETE:
+        raise HTTPException(403, "deleting containers is disabled (UPDOCK_ALLOW_DELETE=false)")
+    if not admin_ok(request, body.password):
+        logging.getLogger("updock").warning("%s: delete refused (wrong admin password)", name,
+                                            extra={"container": name, "event": "security"})
+        raise HTTPException(403, "wrong admin password")
+    try:
+        up.d.inspect(name)
+    except Exception as e:
+        raise HTTPException(404, f"no container {name!r}: {e}")
+    logging.getLogger("updock").warning("%s: delete requested by %s", name,
+                                        getattr(request.state, "user", None) or "admin",
+                                        extra={"container": name, "event": "delete"})
+    return bg(up.delete, name, body.remove_image, body.remove_volumes)
 
 
 @app.get("/api/containers/{name}/tags")

@@ -457,3 +457,12 @@ def test_version(mock_docker):
     d, s = mock_docker
     s["handler"] = lambda r: httpx.Response(200, json={"Version": "29.0.1"})
     assert d.version() == {"Version": "29.0.1"} and s["requests"][-1].url.path == "/version"
+
+
+def test_remove_with_volumes(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(204)
+    d.remove("abc", volumes=True)
+    assert dict(s["requests"][-1].url.params) == {"force": "1", "v": "1"}
+    d.remove("abc")
+    assert dict(s["requests"][-1].url.params) == {"force": "1", "v": "0"}

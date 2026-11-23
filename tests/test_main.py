@@ -49,7 +49,7 @@ def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
         "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {},
-        "user": None, "cooldown_gate": "confirm"}
+        "user": None, "cooldown_gate": "confirm", "allow_delete": True}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -687,3 +687,28 @@ def test_cooldown_override_with_token_or_without_password(client, up, monkeypatc
     assert client.post("/api/containers/web/update", json={"override_cooldown": True}).status_code == 202
     assert client.post("/api/containers/web/update", json={}).status_code == 202
     up.update.assert_called_with("web", False)
+
+
+# ---------- delete ----------
+
+def test_delete_endpoint(client, up, monkeypatch):
+    assert client.post("/api/containers/web/delete").status_code == 202
+    up.delete.assert_called_with("web", False, False)
+    r = client.post("/api/containers/web/delete", json={"remove_image": True, "remove_volumes": True})
+    assert r.status_code == 202
+    up.delete.assert_called_with("web", True, True)
+    up.d.inspect.side_effect = KeyError("nope")
+    assert client.post("/api/containers/nope/delete").status_code == 404
+
+
+def test_delete_needs_admin_password_and_can_be_disabled(client, up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    h = _auth("admin", "s3cret")
+    r = client.post("/api/containers/web/delete", json={"password": "x"}, headers=h)
+    assert r.status_code == 403 and "delete refused" in caplog.text
+    up.delete.assert_not_called()
+    assert client.post("/api/containers/web/delete", json={"password": "s3cret"}, headers=h).status_code == 202
+    assert client.get("/api/containers", headers=h).json()["allow_delete"] is True
+    monkeypatch.setattr(main, "ALLOW_DELETE", False)
+    r = client.post("/api/containers/web/delete", json={"password": "s3cret"}, headers=h)
+    assert r.status_code == 403 and "UPDOCK_ALLOW_DELETE" in r.text

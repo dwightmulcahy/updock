@@ -148,8 +148,9 @@ class FakeDocker:
         self._maybe_fail("connect")
         self.connected = getattr(self, "connected", []) + [(net, cfg)]
 
-    def remove(self, cid):
+    def remove(self, cid, volumes=False):
         self._maybe_fail("remove")
+        self.removed_volumes = volumes
         n, _ = self._find(cid)
         del self.ctrs[n]
 
