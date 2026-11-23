@@ -2194,3 +2194,87 @@ def test_rollback_digest_pinned_ref(fake):
     assert u.state["web"]["previous"]["ref"] == "test/app@sha256:abc"
     u.rollback("web")
     assert fake.created_body["Image"] == OLD_IMG and u.state["web"]["ref"] == OLD_IMG
+
+
+# ---------- updock.health-url ----------
+
+def _url_ctr(url="http://app:80/"):
+    c = make_ctr()
+    c["Config"]["Labels"] = {**c["Config"]["Labels"], "updock.health-url": url}
+    return c
+
+
+def _url_up(fake, codes, **kw):
+    seq = list(codes)
+    calls = []
+
+    def probe(url, timeout):
+        calls.append((url, timeout))
+        v = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(v, Exception):
+            raise v
+        return v
+    clock = {"t": 0.0}
+
+    def sleep(s):
+        clock["t"] += s
+    u = Updater(fake, probe=probe, sleep=sleep, clock=lambda: clock["t"], startup_grace=0,
+                health_timeout=10, **kw)
+    return u, calls
+
+
+def test_health_url_passes_after_retries(fake):
+    fake.add(_url_ctr())
+    publish_new(fake)
+    u, calls = _url_up(fake, [ConnectionError("refused"), 503, 302])
+    u.update("web")
+    assert u.state["web"]["job"] == "updated"
+    assert len(calls) == 3 and calls[0] == ("http://app:80/", 10)
+    assert any("answered 302" in e["msg"] for e in u.logs)
+
+
+def test_health_url_timeout_rolls_back(fake):
+    fake.add(_url_ctr())
+    publish_new(fake)
+    u, _ = _url_up(fake, [500])
+    u.update("web")
+    st = u.state["web"]
+    assert st["job"] == "rolled-back" and "HTTP 500" in st["message"]
+    assert fake.ctrs["web"]["Id"] == CID
+
+
+def test_health_url_container_exits(fake, monkeypatch):
+    fake.add(_url_ctr())
+    publish_new(fake)
+    u, _ = _url_up(fake, [ConnectionError("x")])
+    real = fake.inspect
+
+    def inspect(cid):
+        c = real(cid)
+        if c["Id"] != CID and u.state["web"].get("message", "").startswith("Waiting up to"):
+            c["State"] = {"Running": False, "ExitCode": 3}
+        return c
+    monkeypatch.setattr(fake, "inspect", inspect)
+    u.update("web")
+    assert u.state["web"]["job"] == "rolled-back" and "exited (code 3)" in u.state["web"]["message"]
+
+
+def test_health_url_invalid_scheme_skipped(fake):
+    fake.add(_url_ctr("ftp://x"))
+    publish_new(fake)
+    u, calls = _url_up(fake, [200])
+    u.update("web")
+    assert u.state["web"]["job"] == "updated" and calls == []
+    assert any("invalid updock.health-url" in e["msg"] for e in u.logs)
+
+
+def test_http_probe(monkeypatch):
+    from app import updater as mod
+    seen = {}
+
+    def get(url, **kw):
+        seen.update(url=url, **kw)
+        return type("R", (), {"status_code": 204})()
+    monkeypatch.setattr(mod.httpx, "get", get)
+    assert mod.http_probe("http://x/", 5) == 204
+    assert seen == {"url": "http://x/", "timeout": 5, "follow_redirects": False, "trust_env": False}
