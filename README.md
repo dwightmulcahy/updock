@@ -317,6 +317,15 @@ hardened image against a real Docker daemon (including an end-to-end
 recreate), and rejects fixable high or critical image vulnerabilities with
 Trivy. Dependabot keeps those pins reviewable and current.
 
+
+Browser tests drive the real UI with Playwright against an in-memory Docker and registry (no daemon or network needed); CI runs them on every PR:
+
+```bash
+pip install -r requirements-e2e.txt
+python -m playwright install chromium     # or E2E_CHROME=/path/to/chrome to use a local one
+python -m pytest e2e -o addopts=""
+```
+
 ## Releasing
 
 1. Merge to `main`.
