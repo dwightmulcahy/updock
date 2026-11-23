@@ -98,7 +98,7 @@
   .up-to-date,.updated { background:var(--ok-bg); color:var(--ok); }
   .update-available { background:var(--warn-bg); color:var(--warn); }
   .pulling,.updating,.checking { background:var(--info-bg); color:var(--accent); }
-  .error, .auth-required { background:var(--err-bg); color:var(--err); }
+  .error, .auth-required, .unverified { background:var(--err-bg); color:var(--err); }
   .rolled-back { background:var(--roll-bg); color:var(--warn); }
   .cooldown, .skipped, .rate-limited { background:var(--cool-bg); color:var(--cool); }
   .msg { color:var(--err); font-size:12px; max-width:320px; }
@@ -302,7 +302,7 @@ async function post(url) {
 
 // ---------- container table ----------
 let DATA = [], OPEN = new Set();
-const PROBLEM = new Set(["error", "rolled-back", "auth-required", "rate-limited"]);
+const PROBLEM = new Set(["error", "rolled-back", "auth-required", "rate-limited", "unverified"]);
 const FILTERS = {
   all: ["All", () => true],
   updates: ["Updates", c => c.update_available && c.eligible],
@@ -503,7 +503,7 @@ function headerMenu(ev) {
 let RUN = null, LAST = null, hideDone = 0, optimistic = null;
 const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
   "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
-  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually" };
+  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually", "unverified": "signature check failed" };
 function renderRun() {
   const bar = $("runbar"), active = RUN || optimistic;
   $("btn-check-all").disabled = $("btn-update-all").disabled = !!active;
@@ -521,7 +521,7 @@ function renderRun() {
   if (LAST && LAST.t && Date.now() / 1000 - LAST.t < 60 && LAST.t > hideDone) {
     const r = LAST.results || {}, parts = Object.entries(r).sort((a, b) => b[1] - a[1])
       .map(([k, n]) => `${n} ${RESULT_WORDS[k] || k.replaceAll("-", " ")}`);
-    const bad = ["error", "rolled-back", "auth-required"].some(k => r[k]);
+    const bad = ["error", "rolled-back", "auth-required", "unverified"].some(k => r[k]);
     bar.className = "done" + (bad ? " bad" : ""); bar.hidden = false;
     bar.innerHTML = `<span>${bad ? "⚠" : "✓"}</span><span class="rb-text">${LAST.kind === "update" ? "Update" : "Check"} finished in ${Math.round(LAST.duration)}s` +
       (LAST.total ? ` · ${LAST.total} containers${parts.length ? ": " + esc(parts.join(", ")) : ""}` : " · nothing to do") +
