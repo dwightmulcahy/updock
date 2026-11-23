@@ -63,6 +63,12 @@
   tr.row { cursor:pointer; }
   tr.grp td { background:var(--hover2); border-top:1px solid var(--line); padding:6px 10px; font-size:13px; }
   tr.grp .gname { font-weight:600; } tr.grp .gmeta { color:var(--dim); margin-left:8px; font-size:12px; }
+  .gtoggle { background:none; padding:2px 4px 2px 0; display:inline-flex; gap:6px; align-items:center; font:inherit; color:var(--text); }
+  .gtoggle:hover { filter:none; text-decoration:underline; }
+  .gtoggle .chev { color:var(--dim); font-size:11px; width:10px; display:inline-block; transition:transform .15s; }
+  .gtoggle[aria-expanded=true] .chev { transform:rotate(90deg); }
+  .g-up { color:var(--warn); } .g-bad { color:var(--err); }
+  .gall { background:none; color:var(--accent); padding:2px 4px; font-size:12px; } .gall[hidden] { display:none; }
   tr.grp .actions button { padding:2px 9px; font-size:12px; }
   tr.ingrp td:first-child { padding-left:22px; }
   label.grp { display:inline-flex; align-items:center; gap:4px; margin-left:10px; cursor:pointer; white-space:nowrap; }
@@ -232,6 +238,8 @@
         <option value="updated">Recently updated</option>
       </select>
       <label class="meta grp"><input type="checkbox" id="group"> Group by project</label>
+      <button class="gall" id="gcollapse" hidden onclick="setAllGroups(true)">Collapse all</button>
+      <button class="gall" id="gexpand" hidden onclick="setAllGroups(false)">Expand all</button>
     </div>
   </div>
   <table>
@@ -382,8 +390,9 @@ const FILTERS = {
   excluded: ["Excluded", c => !c.eligible],
 };
 const UI_KEY = "updock.view";
-let view = { q: "", filter: "all", sort: "attention", group: false };
+let view = { q: "", filter: "all", sort: "attention", group: false, collapsed: [] };
 try { view = { ...view, ...JSON.parse(localStorage.getItem(UI_KEY) || "{}") }; } catch (e) {}
+if (!Array.isArray(view.collapsed)) view.collapsed = [];
 const saveView = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(view)); } catch (e) {} };
 
 function tagOf(ref) { const m = /:([^/@]+)$/.exec(ref || ""); return m ? m[1] : ""; }
@@ -495,20 +504,39 @@ function render() {
     .filter(c => !q || c.name.toLowerCase().includes(q) || (c.image || "").toLowerCase().includes(q))
     .sort(SORTS[view.sort] || SORTS.attention);
   let html;
+  $("gcollapse").hidden = $("gexpand").hidden = !view.group;
   if (view.group) {
     const groups = new Map();
     for (const c of rows) { const k = c.project || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); }
     const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
-    html = keys.map(k => groupRow(k, groups.get(k)) + groups.get(k).map(c => rowHtml(c, !!k)).join("")).join("");
+    html = keys.map(k => groupRow(k, groups.get(k)) +
+      (view.collapsed.includes(k) ? "" : groups.get(k).map(c => rowHtml(c, !!k)).join(""))).join("");
   } else html = rows.map(c => rowHtml(c, false)).join("");
   $("rows").innerHTML = html || `<tr><td colspan="4" class="empty">${DATA.length ? "No containers match this filter." : "Loading…"}</td></tr>`;
 }
+function toggleGroup(k) {
+  const i = view.collapsed.indexOf(k);
+  i >= 0 ? view.collapsed.splice(i, 1) : view.collapsed.push(k);
+  saveView(); render();
+}
+function setAllGroups(collapse) {
+  view.collapsed = collapse ? [...new Set(DATA.map(c => c.project || ""))] : [];
+  saveView(); render();
+}
+function groupHead(k, label, list) {
+  const shut = view.collapsed.includes(k);
+  const ups = list.filter(c => c.update_available).length, bad = list.filter(c => PROBLEM.has(c.job)).length;
+  const meta = `${list.length} container${list.length === 1 ? "" : "s"}` +
+    (ups ? ` · <span class="g-up">${ups} update${ups === 1 ? "" : "s"} available</span>` : "") +
+    (bad ? ` · <span class="g-bad">${bad} problem${bad === 1 ? "" : "s"}</span>` : "");
+  return `<button class="gtoggle" aria-expanded="${!shut}" title="${shut ? "Expand" : "Collapse"}" onclick='toggleGroup(${esc(JSON.stringify(k))})'><span class="chev">▶</span><span class="gname">${esc(label)}</span></button><span class="gmeta">${meta}</span>`;
+}
 function groupRow(project, list) {
-  if (!project) return `<tr class="grp"><td colspan="4"><span class="gname">Not in a Compose project</span><span class="gmeta">${list.length}</span></td></tr>`;
+  if (!project) return `<tr class="grp"><td colspan="4">${groupHead("", "Not in a Compose project", list)}</td></tr>`;
   const all = DATA.filter(c => c.project === project && c.eligible);
   const ups = all.filter(c => c.update_available).length, p = esc(JSON.stringify(project));
   const dis = (RUN || optimistic || all.some(c => busy(c.job))) ? "disabled" : "";
-  return `<tr class="grp"><td colspan="3"><span class="gname">${esc(project)}</span><span class="gmeta">${list.length} container${list.length === 1 ? "" : "s"}${ups ? ` · ${ups} update${ups === 1 ? "" : "s"} available` : ""}</span></td>
+  return `<tr class="grp"><td colspan="3">${groupHead(project, project, list)}</td>
     <td><div class="actions">${all.length ? `<button ${dis} title="Check every container of ${esc(project)}" onclick='startRun("check", ${p})'>Check</button>
     <button ${dis} class="${ups ? "primary" : ""}" title="Update ${esc(project)} in dependency order" onclick='startRun("update", ${p})'>Update</button>` : ""}</div></td></tr>`;
 }
