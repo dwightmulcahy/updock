@@ -50,7 +50,14 @@
   .chip.warnc .n { color:var(--warn); } .chip.errc .n { color:var(--err); }
   .toolbar .right { margin-left:auto; display:flex; gap:8px; align-items:center; }
   table { table-layout:fixed; }
-  col.c-name { width:30%; } col.c-ver { width:22%; } col.c-chk { width:90px; } col.c-act { width:160px; }
+  col.c-name { width:48%; } col.c-chk { width:90px; } col.c-act { width:160px; }
+  .sicon { flex:0 0 20px; width:20px; height:20px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center;
+           font-size:12px; font-weight:700; line-height:1; background:var(--line); color:var(--dim); }
+  .sicon.ok { background:var(--ok-bg); color:var(--ok); } .sicon.up { background:var(--warn-bg); color:var(--warn); }
+  .sicon.bad { background:var(--err-bg); color:var(--err); } .sicon.roll { background:var(--roll-bg); color:var(--warn); }
+  .sicon.cool { background:var(--cool-bg); color:var(--cool); } .sicon.purple { background:var(--purple-bg); color:var(--purple); }
+  .sicon.busy { background:var(--info-bg); color:var(--accent); } .sicon .spin { margin:0; width:10px; height:10px; }
+  .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
   td { overflow:hidden; }
   td { vertical-align:top; }
   tr.row { cursor:pointer; }
@@ -101,7 +108,7 @@
   .stepmsg { font-size:12px; color:var(--dim); margin-top:4px; }
   @media (max-width: 900px) {
     col.c-chk, th.h-chk, td.t-chk { display:none; }
-    col.c-name { width:36%; } col.c-ver { width:24%; } col.c-act { width:150px; }
+    col.c-name { width:55%; } col.c-act { width:150px; }
     main { padding:12px; }
   }
   /* no overflow:hidden here: it would stop the header row from sticking */
@@ -170,12 +177,12 @@
     label.grp { margin-left:0; }
     #top { position:static; }
     table, tbody { display:block; } thead, colgroup { display:none; }
-    tr.row { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"name act" "ver ver" "stat stat";
+    tr.row { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"name act" "ver ver";
              column-gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); }
     tr.row td { display:block; border:0; padding:2px 0; }
     tr.row td:nth-child(1) { grid-area:name; } tr.row td:nth-child(2) { grid-area:ver; }
-    tr.row td:nth-child(3) { grid-area:stat; } tr.row td:nth-child(4) { display:none; }
-    tr.row td:nth-child(5) { grid-area:act; align-self:start; }
+    tr.row td:nth-child(3) { display:none; }
+    tr.row td:nth-child(4) { grid-area:act; align-self:start; }
     tr.ingrp td:first-child { padding-left:0; } tr.ingrp { padding-left:22px; }
     tr.detail, tr.grp { display:block; } tr.detail td, tr.grp td { display:block; border-bottom:1px solid var(--line); }
     tr.grp { display:flex; } tr.grp td { border:0; } tr.grp td:first-child { flex:1; }
@@ -222,8 +229,8 @@
     </div>
   </div>
   <table>
-    <colgroup><col class="c-name"><col class="c-ver"><col class="c-stat"><col class="c-chk"><col class="c-act"></colgroup>
-    <thead><tr><th>Container</th><th>Version</th><th>Status</th><th class="h-chk">Checked</th><th></th></tr></thead>
+    <colgroup><col class="c-name"><col class="c-ver"><col class="c-chk"><col class="c-act"></colgroup>
+    <thead><tr><th>Container</th><th>Version</th><th class="h-chk">Checked</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </section>
@@ -384,7 +391,8 @@ function versionCell(c) {
     const nv = l.note ? `<span class="unk" title="${esc(l.note)}">newer image</span>` : (verText(l, c.target_ref || c.image) || '<span class="unk">newer</span>');
     return `<div class="ver">${cur}<span class="arrow">→</span><span class="new">${nv}</span></div>`;
   }
-  if (l && c.job === "up-to-date") return `<div class="ver">${cur}<span class="same" title="Latest available">✓</span></div>`;
+  if (!c.update_available && ["up-to-date", "updated"].includes(c.job))
+    return `<div class="ver">${cur}<span class="same" title="Latest available">✓</span></div>`;
   return `<div class="ver">${cur}</div>`;
 }
 function statusText(c) {
@@ -395,6 +403,18 @@ function statusText(c) {
   const badge = (job || "unchecked").replaceAll("-", " ");
   const show = PROBLEM.has(job) || ["cooldown", "skipped", "reverted"].includes(job);
   return { badge, cls: job, msg: show ? c.message : "", info: !PROBLEM.has(job) };
+}
+// icon + colour for the status shown left of the container name
+const ICONS = { "up-to-date": ["ok", "✓"], updated: ["ok", "✓"], "update-available": ["up", "↑"],
+  error: ["bad", "!"], "auth-required": ["bad", "🔒"], unverified: ["bad", "!"], "rolled-back": ["roll", "↺"],
+  cooldown: ["cool", "⏸"], skipped: ["cool", "⏸"], "rate-limited": ["cool", "⏸"],
+  deployed: ["purple", "⇄"], reverted: ["purple", "↺"], "pinned-digest": ["", "#"], queued: ["", "…"],
+  excluded: ["", "⊘"], unchecked: ["", "○"] };
+function statusIcon(c, st) {
+  const label = st.badge;
+  if (busy(c.job)) return `<span class="sicon busy" title="${esc(label)}"><span class="spin"></span></span><span class="vh">${esc(label)}</span>`;
+  const [cls, glyph] = ICONS[c.queued ? "queued" : c.eligible ? (c.job || "unchecked") : "excluded"] || ["", "•"];
+  return `<span class="sicon ${cls}" title="${esc(label)}" aria-hidden="true">${glyph}</span><span class="vh">${esc(label)}</span>`;
 }
 const STEPS = [["pull", "Pull"], ["stop", "Stop"], ["start", "Start"], ["health", "Health check"], ["cleanup", "Clean up"]];
 function progressBlock(c) {
@@ -428,7 +448,7 @@ function detailRow(c) {
                          : imgCell(c.latest, "newer") + (c.latest.note ? `<div class="img">${esc(c.latest.note)}</div>` : "")) : '<span class="img">not checked yet</span>';
   const flags = [c.pinned && "pinned in the UI: scheduled runs only check it", c.monitor_only && "label updock.monitor-only: scheduled runs only check it",
                  !c.eligible && `excluded: ${c.excluded}`].filter(Boolean);
-  return `<tr class="detail"><td colspan="5"><div class="dgrid">
+  return `<tr class="detail"><td colspan="4"><div class="dgrid">
     <div><h4>Running</h4><div class="img">${esc(c.image)}</div>${cur}</div>
     <div><h4>Latest available</h4>${lat}</div>
     <div><h4>Container</h4><div class="img">${stateLine(c)}</div>
@@ -470,14 +490,14 @@ function render() {
     const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
     html = keys.map(k => groupRow(k, groups.get(k)) + groups.get(k).map(c => rowHtml(c, !!k)).join("")).join("");
   } else html = rows.map(c => rowHtml(c, false)).join("");
-  $("rows").innerHTML = html || `<tr><td colspan="5" class="empty">${DATA.length ? "No containers match this filter." : "Loading…"}</td></tr>`;
+  $("rows").innerHTML = html || `<tr><td colspan="4" class="empty">${DATA.length ? "No containers match this filter." : "Loading…"}</td></tr>`;
 }
 function groupRow(project, list) {
-  if (!project) return `<tr class="grp"><td colspan="5"><span class="gname">Not in a Compose project</span><span class="gmeta">${list.length}</span></td></tr>`;
+  if (!project) return `<tr class="grp"><td colspan="4"><span class="gname">Not in a Compose project</span><span class="gmeta">${list.length}</span></td></tr>`;
   const all = DATA.filter(c => c.project === project && c.eligible);
   const ups = all.filter(c => c.update_available).length, p = esc(JSON.stringify(project));
   const dis = (RUN || optimistic || all.some(c => busy(c.job))) ? "disabled" : "";
-  return `<tr class="grp"><td colspan="4"><span class="gname">${esc(project)}</span><span class="gmeta">${list.length} container${list.length === 1 ? "" : "s"}${ups ? ` · ${ups} update${ups === 1 ? "" : "s"} available` : ""}</span></td>
+  return `<tr class="grp"><td colspan="3"><span class="gname">${esc(project)}</span><span class="gmeta">${list.length} container${list.length === 1 ? "" : "s"}${ups ? ` · ${ups} update${ups === 1 ? "" : "s"} available` : ""}</span></td>
     <td><div class="actions">${all.length ? `<button ${dis} title="Check every container of ${esc(project)}" onclick='startRun("check", ${p})'>Check</button>
     <button ${dis} class="${ups ? "primary" : ""}" title="Update ${esc(project)} in dependency order" onclick='startRun("update", ${p})'>Update</button>` : ""}</div></td></tr>`;
 }
@@ -487,13 +507,12 @@ function rowHtml(c, inGroup) {
     const badges = (c.pinned ? ' <span class="badge pinned-badge">pinned</span>' : "") +
                    (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "");
     return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""} ${inGroup ? "ingrp" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
-      <td><div class="nm"><span class="chev">▶</span>${esc(c.name)}${badges}</div>
-          <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div></td>
-      <td>${versionCell(c)}</td>
-      <td><span class="badge ${esc(st.cls)}">${esc(st.badge)}</span>
+      <td><div class="nm"><span class="chev">▶</span>${statusIcon(c, st)}${esc(c.name)}${badges}</div>
+          <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div>
           ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
           ${progressBlock(c)}
           ${st.msg && !busy(c.job) ? `<div class="msg ${st.info ? "info" : ""}" title="${esc(st.msg)}">${esc(st.msg)}</div>` : ""}</td>
+      <td>${versionCell(c)}</td>
       <td class="t-chk meta">${ago(c.last_check)}</td>
       <td><div class="actions">${primaryAction(c)}<button class="more" title="More actions" aria-label="More actions for ${esc(c.name)}" onclick="event.stopPropagation();rowMenu(event, this.closest('tr').dataset.name)">⋯</button></div></td>
     </tr>${open ? detailRow(c) : ""}`;
