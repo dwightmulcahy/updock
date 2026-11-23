@@ -153,6 +153,8 @@ For every container the UI shows the **running** image and, after a check, the *
 
 **Versions…** lists the tags published for the container's image (selecting one shows its version, digest, image ID and build date from the registry) (Docker Hub, GHCR, Quay, LSCR or any v2 registry; private ones via the mounted `config.json`), newest version first. Deploying a tag recreates the container from `repo:<tag>`, so it stays on that tag; deploy `latest` (or the tag you track) to resume normal updates. The previous image is kept after a version deploy so switching back is instant.
 
+**Roll back to …** (row menu, or `POST /api/containers/{name}/rollback`) returns a container to the image it ran before its last update or version deploy — also after a `latest` update, where there is no older tag to pick. If old-image cleanup already deleted that image, it is pulled back from the registry by its digest. The container is then **pinned** so scheduled runs don't re-apply the newer image; unpin it when a fixed release is out. Rolling back again returns to the newer image.
+
 ### Following version tags (semver)
 
 A container on a version tag (`app:1.4.2`) only gets rebuilds of that same tag. Add the label `updock.semver` to move it to newer version tags instead:

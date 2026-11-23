@@ -566,6 +566,7 @@ class Updater:
             self._set(name, job="updating", step="pull" if name in self._unpulled else "stop",
                       message="Recreating")
             change = self._describe_change(ctr)  # before cleanup removes the old image
+            prev = self._previous_of(ctr)
             revive = avail and not ctr["State"]["Running"] and self.revives(ctr)
             if revive:
                 self._log("stopped, but will be started after the update (revive)",
@@ -580,7 +581,7 @@ class Updater:
                 raise
             self.counters["result_updated" if avail else "result_recreated"] += 1
             self._set(name, job="updated", update_available=False, last_update=time.time(),
-                      message="", failed_image=None, target_ref=None,
+                      message="", failed_image=None, target_ref=None, previous=prev,
                       **({"ref": target_ref} if target_ref else {}))
             self._log("updated" if avail else "recreated", container=name,
                       event="update" if avail else "recreate")
@@ -753,14 +754,69 @@ class Updater:
             self._set(name, job="pulling", step="pull", message=f"Pulling {new_ref}")
             self._pull_image(name, new_ref)
             self._set(name, job="updating", message=f"Deploying {new_ref}")
+            prev = self._previous_of(ctr)
             # Keep the previous image so switching back is instant.
             self._recreate(ctr, image_ref=new_ref, cleanup=False)
             self._restart_compose_dependents(ctr)
-            self._set(name, job="deployed", ref=new_ref, update_available=False,
+            self._set(name, job="deployed", ref=new_ref, update_available=False, previous=prev,
                       latest=None, last_update=time.time(), message="")
             self._log(f"deployed {new_ref}", container=name, event="deploy")
             self.notifier.notify("deploy", name, f"deployed {new_ref}")
         self._locked(name, job)
+
+    def _previous_of(self, ctr):
+        """What the container runs now, so a later rollback can restore it."""
+        info = self._image_info(ctr["Image"]) or {}
+        return {"ref": ctr["Config"]["Image"], "image": ctr["Image"],
+                "digest": info.get("digest"), "version": info.get("version"),
+                "id": info.get("id"), "t": time.time()}
+
+    def rollback(self, name):
+        """Go back to the image the container ran before its last update or deploy, and
+        pin it so scheduled runs don't apply the newer image again. Rolling back twice
+        returns to the newer image."""
+        def job():
+            self.state[name]["action"] = "rollback"
+            prev = self.state[name].get("previous")
+            if not prev:
+                raise RuntimeError("no earlier version recorded for this container")
+            ctr = self.d.inspect(name)
+            back = self._previous_of(ctr)
+            ref = prev["ref"]
+            label = prev.get("version") or (prev.get("id") or prev["image"][7:19])
+            self._set(name, job="pulling", step="pull", message=f"Getting {ref} ({label})")
+            image = self._restore_image(name, prev)
+            if split_ref(ref)[1] is not None:
+                self.d.tag_image(image, ref)  # the tag points at the earlier image again
+            else:
+                ref = image
+            self._set(name, job="updating", message=f"Rolling back to {label}")
+            self._recreate(ctr, image_ref=ref, cleanup=False)  # keep the newer one too
+            self._restart_compose_dependents(ctr)
+            self._set(name, job="reverted", ref=ref, previous=back, pinned=True,
+                      update_available=False, latest=None, last_update=time.time(),
+                      message=f"rolled back to {label}; pinned so scheduled runs don't "
+                              "re-apply the newer image (unpin to resume)")
+            self._log(f"rolled back to {ref} ({label}) and pinned", logging.WARNING, name,
+                      "rollback")
+            self.notifier.notify("rollback", name, f"manually rolled back to {ref} ({label})")
+        self._locked(name, job)
+
+    def _restore_image(self, name, prev):
+        """The earlier image: still local, or pulled back from the registry by digest."""
+        try:
+            self.d.image(prev["image"])
+            return prev["image"]
+        except Exception:
+            pass
+        if not prev.get("digest"):
+            raise RuntimeError("the earlier image was deleted and has no registry digest "
+                               "to pull it back from")
+        pinned = f"{base_repo(prev['ref'])}@{prev['digest']}"
+        self._log(f"earlier image no longer local; pulling {pinned}", container=name,
+                  event="rollback")
+        self._pull_image(name, pinned)
+        return pinned
 
     def dependents(self, cid, name):
         """Containers sharing this container's network namespace (network_mode: container:X,

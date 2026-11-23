@@ -356,6 +356,11 @@ def deploy(name: str, tag: str):
     return bg(up.deploy, name, tag)
 
 
+@app.post("/api/containers/{name}/rollback")
+def rollback(name: str):
+    return bg(up.rollback, name)
+
+
 @app.get("/api/disk")
 def disk():
     try:

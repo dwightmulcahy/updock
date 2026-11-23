@@ -2112,3 +2112,85 @@ def test_list_hides_previous_container_during_update(fake):
     fake.add(make_ctr())
     fake.add(make_ctr("web-updock-old", cid="o" * 64))
     assert [r["name"] for r in u.list()] == ["web"]
+
+
+# ---------- manual rollback ----------
+
+def _updated(fake, **kw):
+    fake.images[OLD_IMG]["RepoDigests"] = ["test/app@sha256:olddigest"]
+    fake.images[OLD_IMG]["Config"] = {**IMG_CFG, "Labels": {"org.opencontainers.image.version": "1.0"}}
+    fake.add(make_ctr())
+    publish_new(fake)
+    u = Updater(fake, **kw)
+    u.update("web")
+    assert u.state["web"]["job"] == "updated"
+    return u
+
+
+def _tagger(fake):
+    def tag_image(src, ref):
+        fake.calls.append(f"tag:{src}>{ref}")
+        fake.tags[ref] = fake.tags.get(src, src)
+    fake.tag_image = tag_image
+
+
+def test_update_records_previous(fake):
+    u = _updated(fake, cleanup=False)
+    prev = u.state["web"]["previous"]
+    assert prev["ref"] == "test/app:latest" and prev["image"] == OLD_IMG
+    assert prev["digest"] == "sha256:olddigest" and prev["version"] == "1.0"
+
+
+def test_rollback_with_local_image_and_toggle(fake):
+    u = _updated(fake, cleanup=False)
+    _tagger(fake)
+    u.rollback("web")
+    st = u.state["web"]
+    assert st["job"] == "reverted" and st["pinned"] is True and "1.0" in st["message"]
+    assert f"tag:{OLD_IMG}>test/app:latest" in fake.calls
+    assert fake.ctrs["web"]["Image"] == OLD_IMG and "pull" not in fake.calls[-12:]
+    assert st["previous"]["image"] == NEW_IMG and NEW_IMG in fake.images  # newer one kept
+    u.rollback("web")
+    assert fake.ctrs["web"]["Image"] == NEW_IMG
+
+
+def test_rollback_pulls_deleted_image_by_digest(fake, monkeypatch):
+    u = _updated(fake)  # cleanup removed the old image
+    assert OLD_IMG not in fake.images
+    _tagger(fake)
+
+    def pull(ref, progress=None):
+        fake.pulled = ref
+        fake.images[OLD_IMG] = {"Id": OLD_IMG, "Config": IMG_CFG}
+        fake.tags[ref] = OLD_IMG
+    monkeypatch.setattr(fake, "pull", pull)
+    u.rollback("web")
+    assert fake.pulled == "test/app@sha256:olddigest"
+    assert fake.ctrs["web"]["Image"] == OLD_IMG and u.state["web"]["job"] == "reverted"
+
+
+def test_rollback_without_digest_fails(fake):
+    fake.add(make_ctr())
+    publish_new(fake)
+    u = Updater(fake)
+    u.update("web")
+    u.rollback("web")
+    assert u.state["web"]["job"] == "error" and "no registry digest" in u.state["web"]["message"]
+
+
+def test_rollback_without_history(up, fake):
+    fake.add(make_ctr())
+    up.rollback("web")
+    assert up.state["web"]["job"] == "error" and "no earlier version" in up.state["web"]["message"]
+
+
+def test_rollback_digest_pinned_ref(fake):
+    fake.add(make_ctr(image="test/app@sha256:abc"))
+    fake.tags["test/app:2.0"] = NEW_IMG
+    fake.images[NEW_IMG] = {"Id": NEW_IMG, "Config": IMG_CFG}
+    fake.tags["sha256:old"] = OLD_IMG
+    u = Updater(fake)
+    u.deploy("web", "2.0")
+    assert u.state["web"]["previous"]["ref"] == "test/app@sha256:abc"
+    u.rollback("web")
+    assert fake.created_body["Image"] == OLD_IMG and u.state["web"]["ref"] == OLD_IMG

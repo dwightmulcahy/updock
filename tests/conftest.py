@@ -132,7 +132,8 @@ class FakeDocker:
         self.created_body = body
         self.ctrs[name] = {"Id": cid, "Name": f"/{name}", "Image": self.tags[body["Image"]],
                            "Config": {"Image": body["Image"], "Labels": body.get("Labels")},
-                           "HostConfig": body["HostConfig"], "State": {"Running": False}}
+                           "HostConfig": body["HostConfig"], "State": {"Running": False},
+                           "NetworkSettings": {"Networks": {}}}
         self.ctrs[name]["Config"]["Healthcheck"] = body.get("Healthcheck")
         return cid
 
