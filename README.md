@@ -84,6 +84,9 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 - An update shows its steps live — Pull (with download %), Stop, Start, Health check (with time left), Clean up — and how long it has been running.
 - Search by name or image, filter (**Updates**, **Problems**, **Running**, **Stopped**, **Excluded**, with counts) and sort (needs attention first, name, last checked, recently updated); the choice is remembered. Narrow screens drop the "checked" column.
 
+
+**Group by project** (toolbar) groups containers by Compose project. Each project has **Check** and **Update** buttons that run just that project, dependencies first (`depends_on`), with the same rules as **Update all** (cooldown, pinned/monitor-only, health checks). API: `POST /api/projects/{project}/check` or `/update`.
+
 ## How it works
 
 1. Asks the registry which digest the container's tag (`nginx:latest`, etc.) points to — a single `HEAD` request, which doesn't download anything or count against Docker Hub pull limits — and compares it with the running image. If the registry can't be reached (or `UPDOCK_DIGEST_CHECK=false`), it falls back to pulling.

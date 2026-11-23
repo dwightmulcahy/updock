@@ -443,6 +443,18 @@ def check_all():
     return bg(up.run_all, False)
 
 
+@app.post("/api/projects/{project}/{action}")
+def project_run(project: str, action: str):
+    """Check or update every container of one Compose project (dependencies first)."""
+    if action not in ("check", "update"):
+        raise HTTPException(404, "unknown action")
+    if project not in up.projects():
+        raise HTTPException(404, f"no Compose project {project!r}")
+    if up.run:
+        raise HTTPException(409, "a run is already in progress")
+    return bg(up.run_all, action == "update", project)
+
+
 @app.post("/api/update-all")
 def update_all():
     if up.run:
