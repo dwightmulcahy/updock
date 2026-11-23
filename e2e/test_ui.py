@@ -163,3 +163,21 @@ def test_version_opens_build_info(page):
     expect(dlg.locator("#blist")).to_contain_text("Python")
     page.keyboard.press("Escape")
     expect(dlg).to_be_hidden()
+
+
+def test_project_groups_collapse_and_expand(page):
+    page.check("#group")
+    head = page.locator("tr.grp", has_text="shop").locator("button.gtoggle")
+    expect(head).to_have_attribute("aria-expanded", "true")
+    expect(row(page, "web")).to_be_visible()
+    head.click()
+    expect(row(page, "web")).to_have_count(0)
+    expect(row(page, "db")).to_have_count(0)
+    expect(row(page, "private")).to_be_visible()  # other groups stay open
+    page.reload()  # remembered
+    expect(row(page, "web")).to_have_count(0)
+    page.click("#gexpand")
+    expect(row(page, "web")).to_be_visible()
+    page.click("#gcollapse")
+    expect(page.locator("tr.row")).to_have_count(0)
+    expect(page.locator("tr.grp")).to_have_count(2)
