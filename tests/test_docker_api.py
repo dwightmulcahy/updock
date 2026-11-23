@@ -451,3 +451,9 @@ def test_tag_image(mock_docker):
     req = s["requests"][-1]
     assert req.method == "POST" and req.url.raw_path.startswith(b"/images/sha256%3Aabc/tag")
     assert dict(req.url.params) == {"repo": "ghcr.io/me/app", "tag": "1.0"}
+
+
+def test_version(mock_docker):
+    d, s = mock_docker
+    s["handler"] = lambda r: httpx.Response(200, json={"Version": "29.0.1"})
+    assert d.version() == {"Version": "29.0.1"} and s["requests"][-1].url.path == "/version"

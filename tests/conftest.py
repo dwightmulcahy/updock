@@ -91,6 +91,9 @@ class FakeDocker:
                  "HostConfig": {"NetworkMode": (c.get("HostConfig") or {}).get("NetworkMode")},
                  "Labels": c["Config"].get("Labels")} for n, c in self.ctrs.items()]
 
+    def version(self):
+        return {"Version": "29.0.1", "ApiVersion": "1.52", "Os": "linux", "Arch": "amd64"}
+
     def inspect(self, cid):
         self._maybe_fail("inspect")
         return copy.deepcopy(self._find(cid)[1])

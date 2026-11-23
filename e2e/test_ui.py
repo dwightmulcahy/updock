@@ -82,6 +82,7 @@ def test_logs_panel_filters(page, up):
     up.check_only("db")
     up.check_only("web")
     page.reload()
+    page.get_by_role("link", name="Logs").click()
     expect(page.locator(".le").first).to_be_visible()
     page.fill("input[placeholder^='Search messages']", "update available")
     expect(page.locator(".le .m", has_text="update available").first).to_be_visible()
@@ -124,3 +125,20 @@ def test_header_and_table_header_stay_put(browser, server, up):
     height = p.evaluate("document.getElementById('top').offsetHeight")
     assert top == 0 and abs(th - height) <= 1
     ctx.close()
+
+
+def test_tabs_and_about(page, up):
+    nav = page.locator("nav.page-nav")
+    expect(nav.locator("a[aria-current=page]")).to_have_text("Containers")
+    nav.get_by_role("link", name="About").click()
+    expect(page.locator("#tab-containers")).to_be_hidden()
+    expect(page.locator("#about-settings")).to_contain_text("Remove old images")
+    expect(page.locator("#about-build")).to_contain_text("Docker engine")
+    assert page.url.endswith("#about")
+    page.reload()  # the tab survives a reload
+    expect(nav.locator("a[aria-current=page]")).to_have_text("About")
+    nav.get_by_role("link", name="Containers").click()
+    row(page, "db").locator("button.more").click()
+    page.get_by_role("button", name="Show logs").click()
+    expect(page.locator("#tab-logs")).to_be_visible()
+    assert page.url.endswith("#logs")
