@@ -260,6 +260,7 @@ async def basic_auth(request: Request, call_next):
         # API token for scripts, CI webhooks and Prometheus: never falls back to Basic
         if not (API_TOKEN and secrets.compare_digest(h[7:].strip(), API_TOKEN)):
             return JSONResponse({"detail": "invalid API token"}, status_code=401)
+        request.state.token = True
         return await call_next(request)
     handled, user = proxy_user(request)
     if handled and not public:
@@ -349,7 +350,8 @@ def index():
 def containers(request: Request):
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
-            "version": VERSION, "user": getattr(request.state, "user", None)}
+            "version": VERSION, "user": getattr(request.state, "user", None),
+            "cooldown_gate": cooldown_gate()}
 
 
 def _log_query(level, container, event, q, after, since, limit):
@@ -382,8 +384,30 @@ def check(name: str):
     return bg(up.check_only, name)
 
 
+class UpdateRequest(BaseModel):
+    override_cooldown: bool = False
+    password: str = ""
+
+
+def cooldown_gate():
+    """What the UI must ask before skipping a cooldown: the admin password when one is
+    set, otherwise just a confirmation."""
+    return "password" if UI_PASS else "confirm"
+
+
 @app.post("/api/containers/{name}/update")
-def update(name: str, force: bool = False):
+def update(name: str, request: Request, force: bool = False, body: UpdateRequest | None = None):
+    override = bool(body and body.override_cooldown)
+    if override and UI_PASS and not getattr(request.state, "token", False) \
+            and not secrets.compare_digest(body.password.encode(), UI_PASS.encode()):
+        logging.getLogger("updock").warning("%s: cooldown override refused (wrong admin password)",
+                                            name, extra={"container": name, "event": "security"})
+        raise HTTPException(403, "wrong admin password")
+    if override:
+        logging.getLogger("updock").warning("%s: cooldown skipped by %s", name,
+                                            getattr(request.state, "user", None) or "admin",
+                                            extra={"container": name, "event": "cooldown"})
+        return bg(up.update, name, force, False, True)
     return bg(up.update, name, force)
 
 

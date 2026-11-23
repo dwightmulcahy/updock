@@ -1,3 +1,4 @@
+import time
 import logging
 
 import pytest
@@ -1242,10 +1243,24 @@ def test_cooldown_defers_unknown_or_future_dates(cup, fake, created, reason):
     assert u.state["web"]["job"] == "cooldown" and reason in u.state["web"]["message"]
 
 
-def test_manual_update_bypasses_cooldown(cup, fake):
+def test_manual_update_honors_cooldown_unless_overridden(cup, fake):
     u = cup(_iso(60))
     u.update("web")
+    assert u.state["web"]["job"] == "cooldown" and "pull" not in fake.calls
+    rows = {r["name"]: r for r in u.list()}
+    cool = rows["web"]["cooldown"]
+    assert cool["delay"] == 86400 and cool["until"] - time.time() == pytest.approx(86400 - 60, abs=5)
+    u.update("web", override_cooldown=True)
     assert u.state["web"]["job"] == "updated"
+    assert "cooldown" not in {r["name"]: r for r in u.list()}["web"]  # no update pending
+
+
+def test_cooldown_info_without_build_date(cup, fake):
+    u = cup(None)
+    u.check("web")
+    info = u.cooldown_info("web", fake.inspect("web"))
+    assert info["until"] is None and "no build date" in info["message"]
+    assert Updater(fake, registry=u.registry).cooldown_info("web", fake.inspect("web")) is None
 
 
 def test_cooldown_label_overrides_and_disables(cup, fake):

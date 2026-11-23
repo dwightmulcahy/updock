@@ -327,6 +327,8 @@ class Updater:
                    "project": (c.get("Labels") or {}).get(COMPOSE_PROJECT),
                    "service": (c.get("Labels") or {}).get(COMPOSE_SERVICE),
                    **st}
+            if row.get("update_available") and isinstance(row.get("latest"), dict):
+                row["cooldown"] = self.cooldown_info(name, {"Config": {"Labels": c.get("Labels")}})
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
             for key in ("current", "latest"):
                 if isinstance(row.get(key), dict):
@@ -551,7 +553,9 @@ class Updater:
             self._set(name, step=None, health_until=None)
             lock.release()
 
-    def update(self, name, force=False, scheduled=False):
+    def update(self, name, force=False, scheduled=False, override_cooldown=False):
+        """Update one container. The cooldown applies to manual updates too unless
+        `override_cooldown` (the UI asks for confirmation, plus the admin password if set)."""
         def job():
             self.state[name]["action"] = "update"
             try:
@@ -562,7 +566,7 @@ class Updater:
                 self._log(f"pull failed ({e}); recreating from local image",
                           logging.WARNING, name, "pull")
                 ctr, avail = self.d.inspect(name), False
-            if avail and scheduled:
+            if avail and not override_cooldown:
                 blocked = self._cooldown_block(name, ctr)
                 if blocked:  # before pulling: a too-new image is never even downloaded
                     self.counters["result_cooldown"] += 1
@@ -689,9 +693,23 @@ class Updater:
 
     def _cooldown_block(self, name, ctr):
         """Why the new image may not be applied yet, or None if it may."""
+        info = self.cooldown_info(name, ctr)
+        return info["message"] if info else None
+
+    def cooldown_info(self, name, ctr):
+        """{"message", "until"} while the known newer image is still in its cooldown
+        (until=None: no usable build date, so it never clears by itself), else None."""
         delay = self.cooldown_for(name, ctr)
         if not delay:
             return None
+        msg = self._cooldown_message(name, delay)
+        if not msg:
+            return None
+        created = parse_timestamp((self.state[name].get("latest") or {}).get("created"))
+        until = created.timestamp() + delay if created and created.timestamp() <= time.time() else None
+        return {"message": msg, "until": until, "delay": delay}
+
+    def _cooldown_message(self, name, delay):
         latest = self.state[name].get("latest") or {}
         label = latest.get("version") or latest.get("id") or "new image"
         created = parse_timestamp(latest.get("created"))
