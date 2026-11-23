@@ -1,4 +1,5 @@
 import base64
+import ipaddress
 import random
 import re
 import logging
@@ -77,6 +78,56 @@ LOG_COUNTS = {}
 LOGBUF.listeners.append(lambda e: LOG_COUNTS.__setitem__(e["level"], LOG_COUNTS.get(e["level"], 0) + 1))
 METRICS_PUBLIC = env_bool("UPDOCK_METRICS_PUBLIC", False)
 API_TOKEN = ENV["UPDOCK_API_TOKEN"].strip()
+
+
+def parse_networks(value):
+    """'10.0.0.0/8, 172.18.0.5' -> [ip_network, ...]; bad entries are logged and skipped."""
+    out = []
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            out.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logging.getLogger("updock").error("UPDOCK_TRUSTED_PROXIES: ignoring invalid "
+                                              "entry %r", item, extra={"event": "security"})
+    return out
+
+
+AUTH_HEADER = os.getenv("UPDOCK_AUTH_HEADER", "").strip()
+TRUSTED_PROXIES = parse_networks(os.getenv("UPDOCK_TRUSTED_PROXIES", ""))
+AUTH_USERS = {u.strip() for u in os.getenv("UPDOCK_AUTH_USERS", "").split(",") if u.strip()}
+
+
+def check_auth_config():
+    if AUTH_HEADER and not TRUSTED_PROXIES:
+        logging.getLogger("updock").error(
+            "UPDOCK_AUTH_HEADER is set but UPDOCK_TRUSTED_PROXIES is empty: the header is "
+            "ignored (anyone could send it); set the reverse proxy's address",
+            extra={"event": "security"})
+
+
+check_auth_config()
+
+
+def from_trusted_proxy(request):
+    try:
+        ip = ipaddress.ip_address((request.client.host if request.client else "") or "")
+    except ValueError:
+        return False
+    return any(ip in net for net in TRUSTED_PROXIES)
+
+
+def proxy_user(request):
+    """(handled, user): with header auth on, requests from a trusted proxy are decided by
+    the header alone. handled=False means 'not from the proxy: use the other checks'."""
+    if not (AUTH_HEADER and TRUSTED_PROXIES) or not from_trusted_proxy(request):
+        return False, None
+    user = request.headers.get(AUTH_HEADER, "").strip()
+    if user and (not AUTH_USERS or user in AUTH_USERS):
+        return True, user
+    return True, None
 HUB = EventHub()
 LOGBUF.listeners.append(lambda e: HUB.publish("log", e))
 PROBES = {"/health", "/livez", "/readyz", "/startupz"}
@@ -206,6 +257,16 @@ async def basic_auth(request: Request, call_next):
         if not (API_TOKEN and secrets.compare_digest(h[7:].strip(), API_TOKEN)):
             return JSONResponse({"detail": "invalid API token"}, status_code=401)
         return await call_next(request)
+    handled, user = proxy_user(request)
+    if handled and not public:
+        if not user:
+            return JSONResponse({"detail": f"not signed in at the reverse proxy ({AUTH_HEADER} "
+                                           "missing or not allowed)"}, status_code=401)
+        request.state.user = user
+        return await call_next(request)
+    if AUTH_HEADER and TRUSTED_PROXIES and not UI_PASS and not public:
+        # header auth is the only login: don't let direct requests skip the proxy
+        return JSONResponse({"detail": "sign in through the reverse proxy"}, status_code=401)
     if UI_PASS and not public:
         ok = False
         if h.startswith("Basic "):
@@ -281,10 +342,10 @@ def index():
 
 
 @app.get("/api/containers")
-def containers():
+def containers(request: Request):
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
-            "version": VERSION}
+            "version": VERSION, "user": getattr(request.state, "user", None)}
 
 
 def _log_query(level, container, event, q, after, since, limit):
