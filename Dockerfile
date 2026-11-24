@@ -1,15 +1,12 @@
 # syntax=docker/dockerfile:1
+# Alpine base (musl): roughly half the size of Debian slim.
 # Stage 1: everything is installed and trimmed here, then copied out as one layer, so
 # files deleted below really leave the image (in a single-stage build they would still
 # sit in the layers underneath).
-FROM python:3.15.2-slim-trixie@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS build
-# Security fixes released after the pinned base image, and only those: a full
-# `apt-get upgrade` rewrote ~28 MB of packages. Regular updates come from bumping the
-# base digest.
-RUN apt-get update && \
-    pkgs="$(apt list --upgradable 2>/dev/null | grep -- '-security' | cut -d/ -f1 | tr '\n' ' ')" && \
-    if [ -n "$pkgs" ]; then apt-get install -y --only-upgrade --no-install-recommends $pkgs; fi && \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/cache/debconf/*-old /var/log/*
+FROM python:3.15.2-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS build
+# Fixes released after the pinned base image. The final image is one copied layer, so
+# upgraded files don't pile up on top of the originals.
+RUN apk upgrade --no-cache && rm -rf /var/cache/apk/*
 COPY requirements.txt /tmp/
 # Exact versions with hashes: reproducible builds, tampered packages are rejected.
 # --no-compile: no .pyc files (~9 MB); the root filesystem is read-only at runtime, so
@@ -23,7 +20,7 @@ RUN pip install --no-cache-dir --no-compile --require-hashes --no-deps -r /tmp/r
            "$lib"/lib-dynload/_sqlite3* "$lib/tkinter" "$lib/turtledemo" "$lib/turtle.py" \
            /usr/local/bin/idle* /usr/local/bin/pydoc* /usr/local/bin/pip* && \
     find "$lib/site-packages" -depth -type d \( -name tests -o -name test \) -exec rm -rf {} + && \
-    rm -rf /tmp/* /root/.cache && \
+    rm -rf /tmp/* /root/.cache /var/cache/apk/* && \
     # state and log history (mount a volume here)
     mkdir -p /data /app
 
