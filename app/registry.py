@@ -1,6 +1,8 @@
 """Minimal OCI distribution (registry v2) client: tags, manifest digests, image config."""
 import hashlib
+import logging
 import re
+import ssl
 import time
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -8,11 +10,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .docker_api import registry_credentials, split_ref
+from .docker_api import registry_credentials, registry_identity_token, split_ref
 from .changelog import source_of
 from .schedule import format_duration
 
+log = logging.getLogger("updock")
 HUB_ALIASES = {"docker.io", "index.docker.io", "registry-1.docker.io"}
+HUB_REGISTRY = "registry-1.docker.io"
+HUB_API = "https://hub.docker.com/v2/repositories"
 MAX_PAGES = 5
 MAX_TAGS = 300
 INDEX_TYPES = ("application/vnd.oci.image.index.v1+json",
@@ -112,10 +117,33 @@ def sort_tags(tags):
     return sorted(set(tags), key=tag_sort_key)[:MAX_TAGS]
 
 
+def tls_context(ca_file=None):
+    """Default trust store, plus the PEM bundle `ca_file` (private CA or self-signed cert)."""
+    ctx = ssl.create_default_context()
+    if ca_file:
+        ctx.load_verify_locations(cafile=ca_file)
+    return ctx
+
+
+def normalize_hosts(hosts):
+    """'registry.lan:5000, http://10.0.0.5:5000/' -> {'registry.lan:5000', '10.0.0.5:5000'}"""
+    out = set()
+    for h in hosts or ():
+        h = h.strip().lower().split("://", 1)[-1].split("/", 1)[0]
+        if h:
+            out.add(HUB_REGISTRY if h in HUB_ALIASES else h)
+    return out
+
+
 class Registry:
-    def __init__(self, client=None):
-        self.c = client or httpx.Client(timeout=20, follow_redirects=True)
+    def __init__(self, client=None, insecure=(), ca_file=None):
+        self.c = client or httpx.Client(timeout=20, follow_redirects=True,
+                                        verify=tls_context(ca_file))
+        self.insecure = normalize_hosts(insecure)  # plain-HTTP registries
         self._auth = {}  # (host, name) -> request kwargs, refreshed on 401
+
+    def base(self, host):
+        return f"{'http' if host in self.insecure else 'https'}://{host}"
 
     def _token(self, header, name, repo_ref):
         scheme, p = _challenge(header)
@@ -128,7 +156,12 @@ class Registry:
         params = {"scope": f"repository:{name}:pull"}
         if "service" in p:
             params["service"] = p["service"]
-        r = self.c.get(p["realm"], params=params, auth=basic)
+        refresh = registry_identity_token(split_ref(repo_ref)[0])
+        if refresh:  # `docker login` OAuth refresh token (e.g. az acr login)
+            r = self.c.post(p["realm"], data={**params, "grant_type": "refresh_token",
+                                              "refresh_token": refresh, "client_id": "docker"})
+        else:
+            r = self.c.get(p["realm"], params=params, auth=basic)
         if r.status_code == 429:
             raise RateLimited(parse_repo(repo_ref)[0],
                               retry_after_seconds(r.headers.get("retry-after")))
@@ -188,7 +221,7 @@ class Registry:
         """Check credentials against the registry's auth endpoint before saving them.
         Raises RegistryAuthError if they're rejected."""
         host = "registry-1.docker.io" if key.startswith("https://index.docker.io") else key
-        r = self.c.get(f"https://{host}/v2/", follow_redirects=False)
+        r = self.c.get(f"{self.base(host)}/v2/", follow_redirects=False)
         if r.status_code == 200:
             return  # registry without auth: nothing to verify
         if r.status_code != 401:
@@ -198,7 +231,7 @@ class Registry:
             params = {"service": p["service"]} if "service" in p else {}
             r = self.c.get(p["realm"], params=params, auth=(username, password))
         else:
-            r = self.c.get(f"https://{host}/v2/", auth=(username, password),
+            r = self.c.get(f"{self.base(host)}/v2/", auth=(username, password),
                            follow_redirects=False)
         if r.status_code in (401, 403):
             raise RegistryAuthError(host, "the login check", r.status_code)
@@ -206,8 +239,18 @@ class Registry:
             raise RegistryError(f"{host}: login check failed with status {r.status_code}")
 
     def tags(self, ref):
+        """Tags of the image's repository, version-like ones newest first. Docker Hub is
+        asked for its most recently pushed tags first (its registry API lists tags
+        alphabetically, so a repo with thousands of tags could hide the newest ones);
+        if that fails (private repo, Hub API down), the registry API is used."""
         host, name = parse_repo(ref)
-        url = f"https://{host}/v2/{name}/tags/list"
+        if host == HUB_REGISTRY:
+            try:
+                return sort_tags(self._hub_tags(name))
+            except (httpx.HTTPError, RegistryError, ValueError, KeyError, TypeError) as e:
+                log.debug("Docker Hub tag API for %s failed (%s); using the registry", name, e,
+                          extra={"event": "check"})
+        url = f"{self.base(host)}/v2/{name}/tags/list"
         params, out = {"n": 1000}, []
         for _ in range(MAX_PAGES):
             r = self._send("GET", url, host, name, ref, params=params)
@@ -220,13 +263,30 @@ class Registry:
             if not nxt:
                 break
             link = nxt[1]
-            url = link if link.startswith("http") else f"https://{host}{link}"
+            url = link if link.startswith("http") else f"{self.base(host)}{link}"
             params = None
         return sort_tags(out)
 
+    def _hub_tags(self, name):
+        """Docker Hub tags ordered by last push, newest first (public repos only)."""
+        url, params, out = f"{HUB_API}/{name}/tags", {"page_size": 100,
+                                                      "ordering": "last_updated"}, []
+        for _ in range(MAX_PAGES):
+            r = self.c.get(url, params=params, follow_redirects=True)
+            if r.status_code >= 400:
+                raise RegistryError(f"hub.docker.com: {r.status_code} listing tags for {name}")
+            data = r.json()
+            out += [t["name"] for t in data.get("results") or [] if t.get("name")]
+            url, params = data.get("next"), None
+            if not url or not url.startswith(HUB_API):
+                break
+        if not out:
+            raise RegistryError(f"hub.docker.com: no tags listed for {name}")
+        return out
+
     def _manifest(self, ref, reference, method="GET"):
         host, name = parse_repo(ref)
-        r = self._send(method, f"https://{host}/v2/{name}/manifests/{reference}", host, name,
+        r = self._send(method, f"{self.base(host)}/v2/{name}/manifests/{reference}", host, name,
                        ref, headers={"Accept": ACCEPT})
         if r.status_code in (401, 403):
             raise RegistryAuthError(host, name, r.status_code)
@@ -264,7 +324,7 @@ class Registry:
                 raise RegistryError(f"no {want.get('os')}/{want.get('architecture')} image in {ref}")
             man = self._manifest(ref, entries[0]["digest"]).json()
         cfg_digest = man["config"]["digest"]
-        b = self._send("GET", f"https://{host}/v2/{name}/blobs/{cfg_digest}", host, name, ref)
+        b = self._send("GET", f"{self.base(host)}/v2/{name}/blobs/{cfg_digest}", host, name, ref)
         if b.status_code in (401, 403):
             raise RegistryAuthError(host, name, b.status_code)
         if b.status_code >= 400:

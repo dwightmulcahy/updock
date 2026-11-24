@@ -467,3 +467,104 @@ def test_forget_drops_cached_tokens():
     r.forget("ghcr.io")
     r.forget("https://index.docker.io/v1/")
     assert list(r._auth) == [("quay.io", "c")]
+
+
+# ---- insecure registries, custom CA, identitytoken, Docker Hub tag ordering ----
+
+def test_normalize_hosts():
+    assert reg.normalize_hosts([" Registry.LAN:5000 ", "http://10.0.0.5:5000/v2", "", "docker.io"]) \
+        == {"registry.lan:5000", "10.0.0.5:5000", "registry-1.docker.io"}
+    assert reg.normalize_hosts(None) == set()
+
+
+def test_insecure_registry_uses_http(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    seen = []
+
+    def h(q):
+        seen.append(str(q.url))
+        if "/tags/list" in q.url.path:
+            return httpx.Response(200, json={"tags": ["1"]},
+                                  headers={"link": "</v2/app/tags/list?last=1>; rel=next"}
+                                  if "last" not in q.url.params else {})
+        if q.url.path == "/v2/":
+            return httpx.Response(200)
+        return httpx.Response(200, headers={"docker-content-digest": "sha256:d"})
+    r = Registry(httpx.Client(transport=httpx.MockTransport(h)), insecure=["registry.lan:5000"])
+    assert r.tags("registry.lan:5000/app:1") == ["1"]
+    assert r.digest("registry.lan:5000/app:1") == "sha256:d"
+    r.verify_login("registry.lan:5000", "u", "p")
+    assert all(u.startswith("http://registry.lan:5000/") for u in seen)
+    assert seen[1].startswith("http://registry.lan:5000/v2/app/tags/list?last=1")
+    assert r.base("ghcr.io") == "https://ghcr.io"
+
+
+def test_tls_context_loads_ca(tmp_path):
+    import ssl
+    assert isinstance(reg.tls_context(), ssl.SSLContext)
+    with pytest.raises((OSError, ssl.SSLError)):
+        reg.tls_context(str(tmp_path / "missing.pem"))
+    assert isinstance(Registry(ca_file=None).c, httpx.Client)
+
+
+def test_identitytoken_exchanged_at_realm(mk, tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"auths": {"me.azurecr.io": {"auth": base64.b64encode(b"00000000:").decode(),
+                                     "identitytoken": "REFRESH"}}}))
+
+    def h(q):
+        if q.url.path == "/oauth2/token":
+            assert q.method == "POST"
+            form = dict(x.split("=", 1) for x in q.content.decode().split("&"))
+            assert form["grant_type"] == "refresh_token" and form["refresh_token"] == "REFRESH"
+            assert form["client_id"] == "docker" and form["service"] == "me.azurecr.io"
+            assert form["scope"] == "repository%3Aapp%3Apull"
+            assert "authorization" not in q.headers
+            return httpx.Response(200, json={"access_token": "ACC"})
+        if q.headers.get("authorization") == "Bearer ACC":
+            return httpx.Response(200, json={"tags": ["2"]})
+        return httpx.Response(401, headers={"www-authenticate":
+            'Bearer realm="https://me.azurecr.io/oauth2/token",service="me.azurecr.io"'})
+    r, _ = mk(h)
+    assert r.tags("me.azurecr.io/app:1") == ["2"]
+
+
+def test_hub_tags_by_last_push(mk):
+    def h(q):
+        assert q.url.host == "hub.docker.com"
+        if q.url.params.get("page") == "2":
+            return httpx.Response(200, json={"results": [{"name": "1.0"}, {}], "next": None})
+        assert q.url.params["ordering"] == "last_updated" and q.url.params["page_size"] == "100"
+        return httpx.Response(200, json={
+            "results": [{"name": "2.0"}, {"name": "latest"}],
+            "next": "https://hub.docker.com/v2/repositories/library/nginx/tags?page=2"})
+    r, reqs = mk(h)
+    assert r.tags("nginx:1.0") == ["2.0", "1.0", "latest"]
+    assert reqs[0].url.path == "/v2/repositories/library/nginx/tags" and len(reqs) == 2
+
+
+def test_hub_tags_foreign_next_link_not_followed(mk):
+    r, reqs = mk(lambda q: httpx.Response(200, json={"results": [{"name": "1"}],
+                                                     "next": "https://evil.example/x"}))
+    assert r.tags("me/app") == ["1"] and len(reqs) == 1
+
+
+@pytest.mark.parametrize("hub", [httpx.Response(404), httpx.Response(200, json={"results": []}),
+                                 httpx.Response(200, text="nope"),
+                                 httpx.Response(429, headers={"retry-after": "5"})])
+def test_hub_tags_fall_back_to_registry(mk, hub, caplog):
+    def h(q):
+        if q.url.host == "hub.docker.com":
+            return hub
+        return httpx.Response(200, json={"tags": ["3"]})
+    r, reqs = mk(h)
+    assert r.tags("me/private:1") == ["3"]
+    assert reqs[-1].url.host == "registry-1.docker.io"
+    assert "Docker Hub tag API for me/private failed" in caplog.text
+
+
+def test_hub_tags_page_cap(mk, monkeypatch):
+    monkeypatch.setattr(reg, "MAX_PAGES", 1)
+    r, reqs = mk(lambda q: httpx.Response(200, json={
+        "results": [{"name": "1"}], "next": "https://hub.docker.com/v2/repositories/a/b/tags?page=2"}))
+    assert r.tags("a/b") == ["1"] and len(reqs) == 1
