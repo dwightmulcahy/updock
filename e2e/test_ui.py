@@ -334,3 +334,14 @@ def test_health_tab(page, up, monkeypatch):
     expect(page.locator("#health-now")).to_contain_text("web")
     expect(page.locator("#health-hist")).to_contain_text("restarted after 4 failed healthchecks")
     expect(page.locator("#health-sum")).to_contain_text("every 1m")
+
+
+def test_self_update_section(page, up, monkeypatch):
+    from app import main
+    from app.selfupdate import SelfUpdater
+    monkeypatch.setattr(main, "SELF", SelfUpdater(up.d, up, main.NOTIFIER, allowed=True,
+                                                  self_ref="nope"))
+    page.goto(page.url.split("#")[0] + "#about")
+    expect(page.locator("#self-sec")).to_be_visible()
+    expect(page.locator("#self-info")).to_contain_text("set UPDOCK_SELF")
+    expect(page.locator("#self-go")).to_be_hidden()

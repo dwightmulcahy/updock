@@ -85,7 +85,7 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 - Search by name or image, filter (**Updates**, **Problems**, **Running**, **Stopped**, **Excluded**, with counts) and sort (needs attention first, name, last checked, recently updated); the choice is remembered. Narrow screens drop the "checked" column.
 
 
-The header has these tabs: **Containers** (the table), **Logs** (filterable live log, newest first, full height), **Health** (only with the [health monitor](#health-monitor) on) and **About** (version, Docker engine and the settings in effect; `GET /api/about`). The tab is kept in the URL (`#logs`, `#health`, `#about`).
+The header has these tabs: **Containers** (the table), **Logs** (filterable live log, newest first, full height), **Health** (only with the [health monitor](#health-monitor) on) and **About** (version, Docker engine, the settings in effect, and [self-update](#self-update) when enabled; `GET /api/about`). The tab is kept in the URL (`#logs`, `#health`, `#about`).
 
 After Updock itself is upgraded, the UI shows **What's new since vX** once per browser: the features, fixes and breaking changes of every release in between, with links to the PRs (also under **⋯ → What's new…**). The notes are bundled into the image at release time (`scripts/build_changelog.py` → `app/changelog.json`, `GET /api/changelog?since=0.5.0`), so no internet access is needed; development builds have none.
 
@@ -150,6 +150,12 @@ With `UPDOCK_HEALTH_INTERVAL` (e.g. `3m`), Updock also watches Docker healthchec
 - Status changes, restarts and notifications are kept for `UPDOCK_HEALTH_HISTORY` (default `7d`) in `/data/health.jsonl` and shown on the **Health** tab, with a **Health** badge on the row. API: `GET /api/health`, `GET /api/health/history?container=web&limit=200`, `POST /api/health/check` (run a pass now).
 
 A container recreated under the same name (by an update, or by you) starts with a clean count.
+
+### Self-update
+
+Set `UPDOCK_ALLOW_SELF_UPDATE=true` and the About tab can update Updock itself: **Check for a new Updock**, then **Self-update…** (admin password when one is set). A process can't replace the container it runs in, so Updock pulls the new image and starts a short-lived helper container from it (`<name>-self-update`: same Docker access, data volume, secrets, env and networks; no published ports; removed when done). The helper does a normal update of the Updock container: stop, rename, create the replacement, wait for its healthcheck, roll back to the old container if it fails. The Updock that comes up (the new one, or the old one after a rollback) logs the outcome with the helper's log and sends a `self-update` notification. A self-update is refused while a run or any job is in progress, and runs wait until it's done.
+
+Updock finds its own container through its hostname (the container ID by default). If you set `hostname:` in Compose, also set `UPDOCK_SELF` to the container's name. Scheduled runs never update Updock; use this or `docker compose pull && docker compose up -d`. API: `GET /api/self`, `POST /api/self/check`, `POST /api/self/update` (`{"password": "…"}`).
 
 ### Disk space guard
 
@@ -249,7 +255,7 @@ Emails are HTML (with a plain-text copy for clients that prefer it): one card pe
 | `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
 | `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
 | `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
-| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,approval,disk,unhealthy,healthy` | Also: `deploy`, `delete` |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,approval,disk,unhealthy,healthy,self-update` | Also: `deploy`, `delete` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
@@ -283,6 +289,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Pin / unpin | `POST /api/containers/{name}/pin?pinned=true\|false` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
 | Health monitor | `GET /api/health`, `GET /api/health/history`, `POST /api/health/check` |
+| Self-update | `GET /api/self`, `POST /api/self/check`, `POST /api/self/update` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 | Image storage vs. limits | `GET /api/disk` |
@@ -340,6 +347,8 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_HEALTH_RESTART_AFTER` | `0` | Restart after this many failed checks; `0` = never (label `updock.health.restart-after`) |
 | `UPDOCK_HEALTH_RESTART_ATTEMPTS` | `3` | Restarts per unhealthy episode |
 | `UPDOCK_HEALTH_HISTORY` | `7d` | How long health history is kept |
+| `UPDOCK_ALLOW_SELF_UPDATE` | `false` | Allow [self-update](#self-update) from the About tab / API |
+| `UPDOCK_SELF` | hostname | Updock's container name, if you changed its hostname |
 | `UPDOCK_INSECURE_REGISTRIES` | empty | Registries reached over plain HTTP (`registry.lan:5000`, comma-separated) |
 | `UPDOCK_REGISTRY_CA` | empty | PEM file with extra CA certificates for registry checks |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
@@ -368,7 +377,7 @@ The **excluded** badge's tooltip says which rule applies.
 
 Protect a container with the label `updock.protected=true` (databases, the socket proxy, anything you only want to hear about): it's checked and shown like any other, and you get "update available" emails, but Updock refuses to stop, update, deploy, roll back or delete it, even from the UI or API (HTTP 409), and the health monitor won't restart it. An update of a container whose network a protected container shares (`network_mode: container:…`) is refused before anything is stopped, and a protected container that depends on a recreated one isn't restarted.
 
-Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
+Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Scheduled runs never update Updock itself (see [Self-update](#self-update)).
 
 Private registries: click **Registries** in the header (or **Add login** on a row that says **auth required**) and enter the registry, username and token — for ghcr.io a GitHub token with `read:packages`, for Docker Hub an access token. Updock checks the login with the registry before saving it, stores it in `/data/registries.json` (mode 600, never shown again), uses it for checks and pulls, and immediately re-checks the containers that were refused. Alternatively mount `~/.docker/config.json` to `/config/config.json`; logins saved in the UI take precedence. Inline `auths` entries work as-is, including the `identitytoken` (OAuth refresh token) that `az acr login` and some other registries write: Updock exchanges it for an access token for checks and passes it to Docker for pulls. For `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`); for AWS ECR that's `docker-credential-ecr-login`.
 
