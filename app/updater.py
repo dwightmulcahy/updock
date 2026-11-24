@@ -17,7 +17,7 @@ from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
                        RegistryError, parse_repo)
-from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump
+from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump, parse as semver_parse
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
@@ -426,10 +426,15 @@ class Updater:
         else:
             old, new = (self._image_info(ctr["Image"]) or {}).get("version"), latest.get("version")
         level = jump(old, new)
-        if not level or not exceeds(level, allow):
+        if level and not exceeds(level, allow):
             return None
+        if not level:
+            old_parsed, new_parsed = semver_parse(old), semver_parse(new)
+            if old_parsed and old_parsed == new_parsed:
+                return None  # rebuild of the same known version
+            level = "unknown"
         key = latest.get("digest") or latest.get("id") or new
-        if key == self.state[name].get("approved"):
+        if key and key == self.state[name].get("approved"):
             return None
         return {"from": old, "to": new, "level": level, "allow": allow, "key": key,
                 "message": f"{old} -> {new} is a {level} update; only {allow} updates are "
@@ -441,7 +446,7 @@ class Updater:
         if not info:
             return False
         self._set(name, job="approval", message=info["message"])
-        if self.state[name].get("notified_approval") != info["key"]:
+        if not info["key"] or self.state[name].get("notified_approval") != info["key"]:
             self._log(f"{info['message']}; waiting for approval", logging.WARNING, name,
                       "approval")
             self.notifier.notify("approval", name, info["message"],
