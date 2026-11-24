@@ -108,6 +108,19 @@ jobs:
           tags: ${{ env.IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Image size
+        run: |
+          size=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+          gz=$(docker save "$IMAGE" | gzip -1 | wc -c)
+          {
+            echo "### Image size"
+            echo "- uncompressed: $((size / 1000000)) MB"
+            echo "- compressed (≈ download, gzip): $((gz / 1000000)) MB"
+            echo
+            echo '```'
+            docker history --format '{{.Size}}\t{{.CreatedBy}}' "$IMAGE" | cut -c1-150
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Pre-pull test images (with retries for registry rate limits)
         run: |
           for img in busybox:stable lscr.io/linuxserver/socket-proxy:latest; do
