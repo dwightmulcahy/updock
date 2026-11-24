@@ -306,7 +306,7 @@
     <label class="meta"><input type="checkbox" id="dvols"> Also delete its anonymous volumes (named volumes and bind mounts are never touched)</label>
     <label class="meta" for="dname">Type <b id="dwant"></b> to confirm</label>
     <input id="dname" autocomplete="off" spellcheck="false" required>
-    <input id="dpass" type="password" placeholder="Admin password" autocomplete="current-password" hidden>
+    <input id="dpass" type="password" placeholder="Updock password (the one you sign in with)" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore hidden>
     <div class="meta" id="dmsg" role="status"></div>
     <div class="row"><button type="button" onclick="ddlg.close()">Cancel</button>
       <button class="primary danger" type="submit" id="dgo" disabled>Delete</button></div>
@@ -316,7 +316,7 @@
   <b id="ctitle">Skip the cooldown?</b>
   <p id="ctext" class="meta" style="max-width:440px;line-height:1.5"></p>
   <form id="cform" onsubmit="overrideCooldown(event)" style="display:grid;gap:8px">
-    <input id="cpass" type="password" placeholder="Admin password" autocomplete="current-password" hidden>
+    <input id="cpass" type="password" placeholder="Updock password (the one you sign in with)" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore hidden>
     <div class="meta" id="cmsg" role="status"></div>
     <div class="row"><button type="button" onclick="cdlg.close()">Cancel</button>
       <button class="primary danger" type="submit" id="cgo">Update anyway</button></div>
@@ -965,12 +965,21 @@ function openCooldown(name) {
   $("cdlg").showModal();
   (GATE === "password" ? $("cpass") : $("cgo")).focus();
 }
+function passwordError(r, d) {
+  if (r.status === 429) return d.detail || "Too many wrong passwords; wait a few minutes.";
+  return "Wrong password. Use the Updock sign-in password (UPDOCK_PASSWORD), not your NAS or browser-saved one.";
+}
 async function overrideCooldown(ev) {
   ev.preventDefault();
+  if ($("cgo").disabled) return;
+  $("cgo").disabled = true;
+  try { await sendOverride(); } finally { $("cgo").disabled = false; }
+}
+async function sendOverride() {
   const r = await fetch(`/api/containers/${encodeURIComponent(COOL_NAME)}/update`, {
     method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
     body: JSON.stringify({ override_cooldown: true, password: $("cpass").value }) });
-  if (r.status === 403) { $("cmsg").textContent = "Wrong admin password."; $("cpass").select(); return; }
+  if (r.status === 403 || r.status === 429) { $("cmsg").textContent = passwordError(r, await r.json().catch(() => ({}))); $("cpass").select(); return; }
   if (!r.ok) { const d = await r.json().catch(() => ({})); $("cmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
   $("cdlg").close(); setTimeout(refresh, 300);
 }
@@ -992,11 +1001,15 @@ function openDelete(name) {
 $("dname").addEventListener("input", () => { $("dgo").disabled = $("dname").value !== DEL_NAME; });
 async function deleteContainer(ev) {
   ev.preventDefault();
-  if ($("dname").value !== DEL_NAME) return;
+  if ($("dname").value !== DEL_NAME || $("dgo").disabled) return;
+  $("dgo").disabled = true;
+  try { await sendDelete(); } finally { $("dgo").disabled = $("dname").value !== DEL_NAME; }
+}
+async function sendDelete() {
   const r = await fetch(`/api/containers/${encodeURIComponent(DEL_NAME)}/delete`, {
     method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
     body: JSON.stringify({ remove_image: $("dimage").checked, remove_volumes: $("dvols").checked, password: $("dpass").value }) });
-  if (r.status === 403) { const d = await r.json().catch(() => ({})); $("dmsg").textContent = d.detail === "wrong admin password" ? "Wrong admin password." : (d.detail || "Not allowed."); return; }
+  if (r.status === 403 || r.status === 429) { const d = await r.json().catch(() => ({})); $("dmsg").textContent = d.detail === "wrong admin password" || r.status === 429 ? passwordError(r, d) : (d.detail || "Not allowed."); $("dpass").select(); return; }
   if (!r.ok) { const d = await r.json().catch(() => ({})); $("dmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
   OPEN.delete(DEL_NAME); $("ddlg").close(); setTimeout(refresh, 300);
 }
