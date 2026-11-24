@@ -1,6 +1,8 @@
 import base64
 from collections import defaultdict, deque
+import inspect
 import ipaddress
+import json
 import random
 import re
 import logging
@@ -14,10 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
-                               StreamingResponse)
+from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
+                                 StreamingResponse)
+from starlette.routing import Route
 
 from . import metrics as metricsmod
 from .config import load_env
@@ -226,7 +233,114 @@ async def lifespan(_):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+# ---- a small web layer on Starlette (what FastAPI is built on) ----
+# Endpoints take the request and return a dict/list (sent as JSON) or a Response.
+# Plain `def` endpoints run in a worker thread (they talk to Docker); the request body is
+# read first, so they can use `body()` without awaiting.
+ROUTES = []
+
+
+def route(path, method="GET"):
+    def add(fn):
+        ROUTES.append(Route(path, _endpoint(fn), methods=[method], name=fn.__name__))
+        return fn
+    return add
+
+
+def _json_default(o):
+    if isinstance(o, (set, frozenset, tuple)):
+        return list(o)
+    if isinstance(o, datetime):
+        return o.isoformat()
+    if isinstance(o, Path):
+        return str(o)
+    raise TypeError(f"{type(o).__name__} is not JSON serializable")
+
+
+class JSON(JSONResponse):
+    def render(self, content):
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":"),
+                          default=_json_default).encode()
+
+
+def _endpoint(fn):
+    is_async = inspect.iscoroutinefunction(fn)
+
+    async def endpoint(request):
+        if request.method in UNSAFE_METHODS:
+            request.state.raw_body = await request.body()
+        out = await fn(request) if is_async else await run_in_threadpool(fn, request)
+        return out if isinstance(out, Response) else JSON(out)
+    return endpoint
+
+
+def _bad(name, kind):
+    raise HTTPException(422, f"query parameter {name!r} must be {kind}")
+
+
+def q_str(request, name, default=None):
+    return request.query_params.get(name, default)
+
+
+def q_bool(request, name, default):
+    v = request.query_params.get(name)
+    if v is None:
+        return default
+    v = v.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    _bad(name, "true or false")
+
+
+def q_num(request, name, default, kind=int):
+    v = request.query_params.get(name)
+    if v is None or v == "":
+        return default
+    try:
+        return kind(v)
+    except ValueError:
+        _bad(name, "an integer" if kind is int else "a number")
+
+
+def q_required(request, name):
+    v = request.query_params.get(name)
+    if v is None:
+        raise HTTPException(422, f"query parameter {name!r} is required")
+    return v
+
+
+def body(request, fields, optional=True):
+    """Parse a JSON object body against {field: (type, default)}; default=... = required.
+    Returns None for an empty body when `optional`."""
+    raw = getattr(request.state, "raw_body", b"")
+    if not raw.strip():
+        if optional:
+            return None
+        raw = b"{}"
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise HTTPException(422, "request body must be JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(422, "request body must be a JSON object")
+    out = {}
+    for key, (kind, default) in fields.items():
+        if key not in data or data[key] is None:
+            if default is ...:
+                raise HTTPException(422, f"{key!r} is required")
+            out[key] = default
+        elif type(data[key]) is not kind:  # no silent coercion (True is not an int, "1" not a bool)
+            raise HTTPException(422, f"{key!r} must be a {kind.__name__}")
+        else:
+            out[key] = data[key]
+    return out
+
+
+async def _http_error(request, exc):
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                        headers=getattr(exc, "headers", None))
 
 
 def csrf_violation(request):
@@ -252,7 +366,6 @@ def csrf_violation(request):
     return None
 
 
-@app.middleware("http")
 async def basic_auth(request: Request, call_next):
     path = request.url.path
     public = path in PROBES or (METRICS_PUBLIC and path == "/metrics")
@@ -286,7 +399,6 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
 async def security(request: Request, call_next):
     reason = csrf_violation(request)
     if reason:
@@ -308,18 +420,18 @@ def bg(fn, *a):
     return JSONResponse({"queued": True}, status_code=202)
 
 
-@app.get("/health")
-def health():
+@route("/health", "GET")
+def health(request):
     return {"status": "ok", "version": VERSION, "commit": COMMIT}
 
 
-@app.get("/livez")
-def livez():
+@route("/livez", "GET")
+def livez(request):
     return {"status": "ok"}
 
 
-@app.get("/readyz")
-def readyz():
+@route("/readyz", "GET")
+def readyz(request):
     try:
         ok = up.d.ping()
     except Exception:
@@ -329,26 +441,26 @@ def readyz():
     return {"status": "ok", "docker": True}
 
 
-@app.get("/startupz")
-def startupz():
+@route("/startupz", "GET")
+def startupz(request):
     if not STARTED["done"]:
         return JSONResponse({"status": "starting"}, status_code=503)
     return {"status": "ok"}
 
 
-@app.get("/metrics")
-def metrics():
+@route("/metrics", "GET")
+def metrics(request):
     return PlainTextResponse(metricsmod.render(up, up.list(), VERSION, COMMIT, LOG_COUNTS),
                              media_type="text/plain; version=0.0.4")
 
 
-@app.get("/")
-def index():
+@route("/", "GET")
+def index(request):
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
-@app.get("/api/containers")
-def containers(request: Request):
+@route("/api/containers", "GET")
+def containers(request):
     return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
             "version": VERSION, "user": getattr(request.state, "user", None),
@@ -360,17 +472,19 @@ def _log_query(level, container, event, q, after, since, limit):
                         since=since, limit=min(max(limit, 0), 5000))
 
 
-@app.get("/api/logs")
-def logs(level: str | None = None, container: str | None = None, event: str | None = None,
-         q: str | None = None, after: int | None = None, since: float | None = None,
-         limit: int = 500):
+@route("/api/logs", "GET")
+def logs(request):
+    level, container, event, q = (q_str(request, k) for k in ("level", "container", "event", "q"))
+    after, since = q_num(request, "after", None), q_num(request, "since", None, float)
+    limit = q_num(request, "limit", 500)
     return {"entries": _log_query(level, container, event, q, after, since, limit),
             **LOGBUF.facets()}
 
 
-@app.get("/api/logs/download")
-def logs_download(level: str | None = None, container: str | None = None,
-                  event: str | None = None, q: str | None = None, fmt: str = "text"):
+@route("/api/logs/download", "GET")
+def logs_download(request):
+    level, container, event, q = (q_str(request, k) for k in ("level", "container", "event", "q"))
+    fmt = q_str(request, "fmt", "text")
     entries = _log_query(level, container, event, q, None, None, 0)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     if fmt == "json":
@@ -380,14 +494,15 @@ def logs_download(level: str | None = None, container: str | None = None,
         "Content-Disposition": f'attachment; filename="updock-logs-{stamp}.log"'})
 
 
-@app.post("/api/containers/{name}/check")
-def check(name: str):
+@route("/api/containers/{name}/check", "POST")
+def check(request):
+    name = request.path_params["name"]
     return bg(up.check_only, name)
 
 
-class UpdateRequest(BaseModel):
-    override_cooldown: bool = False
-    password: str = ""
+UPDATE_BODY = {"override_cooldown": (bool, False), "password": (str, "")}
+DELETE_BODY = {"remove_image": (bool, False), "remove_volumes": (bool, False), "password": (str, "")}
+LOGIN_BODY = {"host": (str, ...), "username": (str, ...), "password": (str, ...)}
 
 
 ALLOW_DELETE = env_bool("UPDOCK_ALLOW_DELETE", True)
@@ -427,11 +542,13 @@ def cooldown_gate():
     return "password" if UI_PASS else "confirm"
 
 
-@app.post("/api/containers/{name}/update")
-def update(name: str, request: Request, force: bool = False, body: UpdateRequest | None = None):
-    override = bool(body and body.override_cooldown)
+@route("/api/containers/{name}/update", "POST")
+def update(request):
+    name, force = request.path_params["name"], q_bool(request, "force", False)
+    data = body(request, UPDATE_BODY)
+    override = bool(data and data["override_cooldown"])
     if override:
-        require_admin(request, body.password, name, "cooldown override")
+        require_admin(request, data["password"], name, "cooldown override")
     if override:
         logging.getLogger("updock").warning("%s: cooldown skipped by %s", name,
                                             getattr(request.state, "user", None) or "admin",
@@ -440,19 +557,14 @@ def update(name: str, request: Request, force: bool = False, body: UpdateRequest
     return bg(up.update, name, force)
 
 
-class DeleteRequest(BaseModel):
-    remove_image: bool = False
-    remove_volumes: bool = False
-    password: str = ""
-
-
-@app.post("/api/containers/{name}/delete")
-def delete(name: str, request: Request, body: DeleteRequest | None = None):
+@route("/api/containers/{name}/delete", "POST")
+def delete(request):
     """Stop and remove a container (admin password required when one is set)."""
-    body = body or DeleteRequest()
+    name = request.path_params["name"]
+    data = body(request, DELETE_BODY, optional=False)
     if not ALLOW_DELETE:
         raise HTTPException(403, "deleting containers is disabled (UPDOCK_ALLOW_DELETE=false)")
-    require_admin(request, body.password, name, "delete")
+    require_admin(request, data["password"], name, "delete")
     try:
         up.d.inspect(name)
     except Exception as e:
@@ -460,19 +572,21 @@ def delete(name: str, request: Request, body: DeleteRequest | None = None):
     logging.getLogger("updock").warning("%s: delete requested by %s", name,
                                         getattr(request.state, "user", None) or "admin",
                                         extra={"container": name, "event": "delete"})
-    return bg(up.delete, name, body.remove_image, body.remove_volumes)
+    return bg(up.delete, name, data["remove_image"], data["remove_volumes"])
 
 
-@app.get("/api/containers/{name}/tags")
-def tags(name: str):
+@route("/api/containers/{name}/tags", "GET")
+def tags(request):
+    name = request.path_params["name"]
     try:
         return up.tags(name)
     except Exception as e:
         raise HTTPException(502, f"could not list tags: {e}")
 
 
-@app.get("/api/containers/{name}/tags/{tag}")
-def tag_info(name: str, tag: str):
+@route("/api/containers/{name}/tags/{tag}", "GET")
+def tag_info(request):
+    name, tag = request.path_params["name"], request.path_params["tag"]
     if not TAG_RE.match(tag):
         raise HTTPException(400, "invalid tag")
     try:
@@ -481,8 +595,9 @@ def tag_info(name: str, tag: str):
         raise HTTPException(502, f"could not read {tag}: {e}")
 
 
-@app.post("/api/containers/{name}/pin")
-def pin(name: str, pinned: bool = True):
+@route("/api/containers/{name}/pin", "POST")
+def pin(request):
+    name, pinned = request.path_params["name"], q_bool(request, "pinned", True)
     try:
         up.pin(name, pinned)
     except Exception as e:
@@ -490,60 +605,57 @@ def pin(name: str, pinned: bool = True):
     return {"name": name, "pinned": pinned}
 
 
-@app.post("/api/containers/{name}/deploy")
-def deploy(name: str, tag: str):
+@route("/api/containers/{name}/deploy", "POST")
+def deploy(request):
+    name, tag = request.path_params["name"], q_required(request, "tag")
     if not TAG_RE.match(tag):
         raise HTTPException(400, "invalid tag")
     return bg(up.deploy, name, tag)
 
 
-@app.post("/api/containers/{name}/rollback")
-def rollback(name: str):
+@route("/api/containers/{name}/rollback", "POST")
+def rollback(request):
+    name = request.path_params["name"]
     return bg(up.rollback, name)
 
 
-@app.get("/api/disk")
-def disk():
+@route("/api/disk", "GET")
+def disk(request):
     try:
         return up.disk_status(max_age=60)
     except Exception as e:
         raise HTTPException(502, f"could not read disk usage: {e}")
 
 
-@app.get("/api/events")
-async def events(request: Request):
+@route("/api/events", "GET")
+async def events(request):
     q = HUB.subscribe()
     return StreamingResponse(eventsmod.stream(HUB, q, request.is_disconnected),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-class LoginIn(BaseModel):
-    host: str
-    username: str
-    password: str
-
-
-@app.get("/api/registries")
-def registries():
+@route("/api/registries", "GET")
+def registries(request):
     return {"logins": LOGINS.list(), "persisted": bool(LOGINS.path)}
 
 
-@app.post("/api/registries")
-def add_registry(login: LoginIn, verify: bool = True):
-    host, user = login.host.strip(), login.username.strip()
-    if not host or not user or not login.password:
+@route("/api/registries", "POST")
+def add_registry(request):
+    login, verify = body(request, LOGIN_BODY, optional=False), q_bool(request, "verify", True)
+    host, user, password = login["host"].strip(), login["username"].strip(), login["password"]
+    if not host or not user or not password:
         raise HTTPException(400, "host, username and password are required")
     key = normalize_registry(host)
     if verify and up.registry:
         try:
-            up.registry.verify_login(key, user, login.password)
+            up.registry.verify_login(key, user, password)
         except RegistryAuthError:
             raise HTTPException(400, f"{display_host(key)} rejected this username/password")
         except Exception as e:
             raise HTTPException(502, f"could not verify the login with {display_host(key)}: {e}"
                                      " (save without checking to keep it anyway)")
-    LOGINS.set(key, user, login.password)
+    LOGINS.set(key, user, password)
     if up.registry:
         up.registry.forget(key)
     up._backoff.pop(key, None)
@@ -553,8 +665,9 @@ def add_registry(login: LoginIn, verify: bool = True):
     return {"saved": True, "host": display_host(key), "rechecking": names}
 
 
-@app.delete("/api/registries/{host}")
-def remove_registry(host: str):
+@route("/api/registries/{host}", "DELETE")
+def remove_registry(request):
+    host = request.path_params["host"]
     key = normalize_registry(host)
     if not LOGINS.remove(key):
         raise HTTPException(404, f"no saved login for {display_host(key)}")
@@ -569,8 +682,8 @@ def auth_mode():
     return "password" if UI_PASS else "none"
 
 
-@app.get("/api/build-info")
-def build_info():
+@route("/api/build-info", "GET")
+def build_info(request):
     """Details for the dialog opened by clicking the version in the header."""
     sha = os.getenv("GIT_SHA") or None
     return {"version": VERSION, "commit": sha[:12] if sha else None, "build_date": BUILD_DATE,
@@ -579,8 +692,8 @@ def build_info():
             "started_at": STARTED_AT}
 
 
-@app.get("/api/about")
-def about():
+@route("/api/about", "GET")
+def about(request):
     """Build, engine and effective settings for the About tab (no secrets)."""
     try:
         v = up.d.version()
@@ -605,13 +718,13 @@ def about():
     }
 
 
-@app.get("/api/notify")
-def notify_info():
+@route("/api/notify", "GET")
+def notify_info(request):
     return NOTIFIER.describe()
 
 
-@app.post("/api/notify/test")
-def notify_test():
+@route("/api/notify/test", "POST")
+def notify_test(request):
     try:
         NOTIFIER.test()
     except Exception as e:
@@ -619,16 +732,17 @@ def notify_test():
     return {"sent": True, "to": NOTIFIER.to}
 
 
-@app.post("/api/check-all")
-def check_all():
+@route("/api/check-all", "POST")
+def check_all(request):
     if up.run:
         raise HTTPException(409, "a run is already in progress")
     return bg(up.run_all, False)
 
 
-@app.post("/api/projects/{project}/{action}")
-def project_run(project: str, action: str):
+@route("/api/projects/{project}/{action}", "POST")
+def project_run(request):
     """Check or update every container of one Compose project (dependencies first)."""
+    project, action = request.path_params["project"], request.path_params["action"]
     if action not in ("check", "update"):
         raise HTTPException(404, "unknown action")
     if project not in up.projects():
@@ -638,8 +752,16 @@ def project_run(project: str, action: str):
     return bg(up.run_all, action == "update", project)
 
 
-@app.post("/api/update-all")
-def update_all():
+@route("/api/update-all", "POST")
+def update_all(request):
     if up.run:
         raise HTTPException(409, "a run is already in progress")
     return bg(up.run_all, True)
+
+
+app = Starlette(
+    routes=ROUTES, lifespan=lifespan,
+    exception_handlers={HTTPException: _http_error},
+    # first = outermost: security headers and CSRF checks wrap the authentication check
+    middleware=[Middleware(BaseHTTPMiddleware, dispatch=security),
+                Middleware(BaseHTTPMiddleware, dispatch=basic_auth)])
