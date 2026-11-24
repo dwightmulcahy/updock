@@ -64,7 +64,7 @@ def test_single_event_email_starttls_login():
     msg = s.sent[0]
     assert msg["Subject"] == "[updock] web: updated"
     assert msg["To"] == "a@x.io, b@x.io" and msg["From"] == "u"
-    body = msg.get_content()
+    body = msg.get_body(("plain",)).get_content()
     assert "Updock on nas" in body and "[updated]  web: test/app 1 -> 2" in body
     assert "Open Updock: http://nas:8080" in body
 
@@ -103,7 +103,7 @@ def test_batch_combines_and_nesting():
     assert len(FakeSMTP.instances) == 1
     msg = FakeSMTP.instances[0].sent[0]
     assert msg["Subject"] == "[updock] nas: 1 rolled back, 2 updated"
-    body = msg.get_content()
+    body = msg.get_body(("plain",)).get_content()
     assert body.index("web: a") < body.index("db: b") < body.index("app: c")
 
 
@@ -136,7 +136,7 @@ def test_test_email_raises_on_failure():
     FakeSMTP.fail = None
     mk().test()
     m = FakeSMTP.instances[-1].sent[0]
-    assert "Test email from Updock" in m.get_content() and m["Subject"] == "[updock] nas: test email"
+    assert "Test email from Updock" in m.get_body(("plain",)).get_content() and m["Subject"] == "[updock] nas: test email"
     assert m["Date"] and m["Message-ID"].endswith("@updock>")
 
 
