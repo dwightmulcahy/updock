@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 from html import escape
 
 TITLES = {"update": "updated", "rollback": "rolled back", "error": "failed",
-          "available": "update available", "deploy": "deployed", "delete": "deleted",
+          "available": "update available", "approval": "needs approval", "deploy": "deployed", "delete": "deleted",
           "disk": "disk space", "test": "test email"}
-COLORS = {"update": "#16a34a", "available": "#d97706", "error": "#dc2626",
+COLORS = {"update": "#16a34a", "available": "#d97706", "approval": "#ea580c", "error": "#dc2626",
           "rollback": "#dc2626", "deploy": "#7c3aed", "delete": "#6b7280", "disk": "#2563eb",
           "test": "#2563eb"}
-ICONS = {"update": "✓", "available": "↑", "error": "!", "rollback": "↺", "deploy": "⇄",
+ICONS = {"update": "✓", "available": "↑", "approval": "⚑", "error": "!", "rollback": "↺", "deploy": "⇄",
          "delete": "✕", "disk": "◔", "test": "✉"}
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 

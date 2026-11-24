@@ -13,8 +13,8 @@ from .email_render import html_body, text_body, title
 
 log = logging.getLogger("updock")
 
-ALL_EVENTS = ("update", "rollback", "error", "available", "deploy", "disk", "delete")
-DEFAULT_EVENTS = ("update", "rollback", "error", "available", "disk")
+ALL_EVENTS = ("update", "rollback", "error", "available", "approval", "deploy", "disk", "delete")
+DEFAULT_EVENTS = ("update", "rollback", "error", "available", "approval", "disk")
 
 
 class EmailNotifier:
@@ -87,7 +87,7 @@ class EmailNotifier:
             i = items[0]
             subject = f"[updock] {i['container'] or self.instance}: {title(i['event'])}"
             ver = ((i.get("details") or {}).get("to") or {}).get("version")
-            if i["event"] in ("update", "available") and ver:
+            if i["event"] in ("update", "available", "approval") and ver:
                 subject += f" to {ver}"
         else:
             parts = [f"{n} {title(e)}" for e, n in sorted(counts.items())]

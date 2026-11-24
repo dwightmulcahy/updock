@@ -57,6 +57,7 @@
   .sicon.ok { background:var(--ok-bg); color:var(--ok); } .sicon.up { background:var(--warn-bg); color:var(--warn); }
   .sicon.bad { background:var(--err-bg); color:var(--err); } .sicon.roll { background:var(--roll-bg); color:var(--warn); }
   .sicon.cool { background:var(--cool-bg); color:var(--cool); } .sicon.purple { background:var(--purple-bg); color:var(--purple); }
+  .sicon.flag { background:var(--warn); color:#fff; }
   .sicon.busy { background:var(--info-bg); color:var(--accent); } .sicon .spin { margin:0; width:10px; height:10px; }
   .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
   td { overflow:hidden; }
@@ -140,6 +141,7 @@
   .pulling,.updating,.checking { background:var(--info-bg); color:var(--accent); }
   .error, .auth-required, .unverified { background:var(--err-bg); color:var(--err); }
   .rolled-back { background:var(--roll-bg); color:var(--warn); }
+  .approval { background:var(--warn-bg); color:var(--warn); }
   .cooldown, .skipped, .rate-limited { background:var(--cool-bg); color:var(--cool); }
   .msg { color:var(--err); font-size:12px; max-width:320px; }
   .actions { display:flex; gap:6px; justify-content:flex-end; }
@@ -469,21 +471,21 @@ function statusText(c) {
   if (c.job === "pulling" && c.progress != null) return { badge: `pulling ${c.progress}%`, cls: "pulling" };
   const job = c.job || (c.pinned || c.monitor_only ? "" : "unchecked");
   const badge = (job || "unchecked").replaceAll("-", " ");
-  const show = PROBLEM.has(job) || ["cooldown", "skipped", "reverted"].includes(job);
+  const show = PROBLEM.has(job) || ["cooldown", "skipped", "reverted", "approval"].includes(job);
   return { badge, cls: job, msg: show ? c.message : "", info: !PROBLEM.has(job) };
 }
 // icon + colour for the status shown left of the container name
 const ICONS = { "up-to-date": ["ok", "✓"], updated: ["ok", "✓"], "update-available": ["up", "↑"],
   error: ["bad", "!"], "auth-required": ["bad", "🔒"], unverified: ["bad", "!"], "rolled-back": ["roll", "↺"],
-  cooldown: ["cool", "◷"], skipped: ["cool", "◷"], "rate-limited": ["cool", "◷"],
+  cooldown: ["cool", "◷"], skipped: ["cool", "◷"], "rate-limited": ["cool", "◷"], approval: ["flag", "⚑"],
   deployed: ["purple", "⇄"], reverted: ["purple", "↺"], "pinned-digest": ["", "#"], queued: ["", "…"],
   excluded: ["", "⊘"], unchecked: ["", "○"] };
 function statusIcon(c, st) {
   const label = st.badge;
   if (busy(c.job)) return `<span class="sicon busy" title="${esc(label)}"><span class="spin"></span></span><span class="vh">${esc(label)}</span>`;
-  const key = c.queued ? "queued" : !c.eligible ? "excluded" : c.update_available && c.cooldown ? "cooldown" : (c.job || "unchecked");
+  const key = c.queued ? "queued" : !c.eligible ? "excluded" : c.update_available && c.approval ? "approval" : c.update_available && c.cooldown ? "cooldown" : (c.job || "unchecked");
   const [cls, glyph] = ICONS[key] || ["", "•"];
-  const tip = c.update_available && c.cooldown ? `update available · in cooldown${c.cooldown.until ? ` until ${new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"})}` : ""}` : label;
+  const tip = c.update_available && c.approval ? `${c.approval.level} update ${c.approval.from} → ${c.approval.to} · needs approval` : c.update_available && c.cooldown ? `update available · in cooldown${c.cooldown.until ? ` until ${new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "short", timeStyle: "short"})}` : ""}` : label;
   return `<span class="sicon ${cls}" title="${esc(tip)}" aria-hidden="true">${glyph}</span><span class="vh">${esc(label)}</span>`;
 }
 const STEPS = [["pull", "Pull"], ["stop", "Stop"], ["start", "Start"], ["health", "Health check"], ["cleanup", "Clean up"]];
@@ -504,6 +506,7 @@ function primaryAction(c) {
   if (c.queued) return `<button disabled>queued</button>`;
   if (!c.eligible) return "";
   if (c.job === "auth-required") return `<button class="primary" onclick="event.stopPropagation();openLogins('${esc(c.auth_host || "")}')">Add login</button>`;
+  if (c.update_available && c.approval) return `<button class="primary" title="${esc(c.approval.message)}" onclick="event.stopPropagation();openApproval(this.closest('tr').dataset.name)">Approve…</button>`;
   if (c.update_available && c.cooldown) return `<button title="${esc(c.cooldown.message)}" onclick="event.stopPropagation();openCooldown(this.closest('tr').dataset.name)">Update…</button>`;
   if (c.update_available) return `<button class="primary" onclick="event.stopPropagation();post('/api/containers/${n}/update')">Update</button>`;
   return `<button onclick="event.stopPropagation();post('/api/containers/${n}/check')">Check</button>`;
@@ -632,7 +635,7 @@ function rowMenu(ev, name) {
   const notes = (c.update_available && c.latest && c.latest.changelog) || (c.current && c.current.changelog);
   showMenu(ev, [
     { label: "Check now", disabled: dis, run: () => post(`/api/containers/${n}/check`) },
-    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
+    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => c.update_available && c.approval ? openApproval(name) : c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
     { label: "Recreate (same image)", disabled: dis, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
     { label: "Versions…", disabled: dis, run: () => openVersions(name) },
     ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: dis,
@@ -666,7 +669,7 @@ function headerMenu(ev) {
 let RUN = null, LAST = null, hideDone = 0, optimistic = null, GATE = "confirm", ALLOW_DELETE = false;
 const RESULT_WORDS = { "update-available": "update available", "up-to-date": "up to date", "updated": "updated",
   "rolled-back": "rolled back", "error": "failed", "auth-required": "need a login", "rate-limited": "rate limited",
-  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually", "unverified": "signature check failed" };
+  "cooldown": "in cooldown", "skipped": "skipped", "pinned-digest": "pinned by digest", "reverted": "rolled back manually", "unverified": "signature check failed", "approval": "needs approval" };
 function renderRun() {
   const bar = $("runbar"), active = RUN || optimistic;
   $("btn-check-all").disabled = $("btn-update-all").disabled = !!active;
@@ -942,7 +945,7 @@ async function loadAbout() {
     ["Only labelled containers", yn(st.label_enable)], ["Include stopped", yn(st.include_stopped)],
     ["Revive stopped", yn(st.revive_stopped)],
     ["Health timeout", `${st.health_timeout}s (startup grace ${st.startup_grace}s)`],
-    st.cooldown && ["Cooldown", `${st.cooldown}s`], ["Lifecycle hooks", yn(st.hooks)],
+    st.cooldown && ["Cooldown", `${st.cooldown}s`], st.allow && ["Allowed without approval", `${st.allow} updates`], ["Lifecycle hooks", yn(st.hooks)],
     st.scope && ["Scope", st.scope],
     ["Email", n.enabled ? `to ${(n.to || []).join(", ")} via ${n.server}` : "off"],
   ]);
@@ -971,10 +974,28 @@ $("ver").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === "
 $("bdlg").addEventListener("click", e => { if (e.target === $("bdlg")) $("bdlg").close(); });
 
 // ---- skipping a cooldown: confirm, plus the admin password when one is set ----
-let COOL_NAME = null;
+let COOL_NAME = null, COOL_MODE = "cooldown";
+function gateDialog() {
+  $("cpass").hidden = GATE !== "password"; $("cpass").required = GATE === "password"; $("cpass").value = "";
+  $("cmsg").textContent = "";
+  $("cdlg").showModal();
+  (GATE === "password" ? $("cpass") : $("cgo")).focus();
+}
+// ---- approving a version step beyond updock.allow / UPDOCK_ALLOW ----
+function openApproval(name) {
+  const c = DATA.find(x => x.name === name); if (!c || !c.approval) return;
+  COOL_NAME = name; COOL_MODE = "approval";
+  const a = c.approval;
+  $("ctitle").textContent = `Approve ${name} ${a.from} → ${a.to}?`;
+  $("ctext").textContent = `This is a ${a.level} update; ${name} only gets ${a.allow} updates automatically. ` +
+    "Read the release notes for breaking changes before approving. Approving updates it now" +
+    (c.cooldown ? "; its cooldown still applies, and the update follows once the cooldown ends." : ".");
+  $("cgo").textContent = "Approve & update";
+  gateDialog();
+}
 function openCooldown(name) {
   const c = DATA.find(x => x.name === name); if (!c || !c.cooldown) return;
-  COOL_NAME = name;
+  COOL_NAME = name; COOL_MODE = "cooldown"; $("cgo").textContent = "Update anyway";
   const l = c.latest || {}, built = l.created ? new Date(l.created) : null;
   const age = built ? Math.max(0, Date.now() - built.getTime()) / 3600000 : null;
   const until = c.cooldown.until ? new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : null;
@@ -982,10 +1003,7 @@ function openCooldown(name) {
   $("ctext").textContent = (built ? `The new image of ${c.image} was built ${age < 1 ? "less than an hour" : `${Math.round(age)} hour${Math.round(age) === 1 ? "" : "s"}`} ago` : `The new image of ${c.image} has no build date`) +
     `, and the cooldown is ${Math.round(c.cooldown.delay / 3600)}h${until ? ` (it would be applied automatically after ${until})` : ""}. ` +
     "The cooldown gives broken or compromised releases time to be noticed and pulled before they reach you. Updating now skips that safety margin.";
-  $("cpass").hidden = GATE !== "password"; $("cpass").required = GATE === "password"; $("cpass").value = "";
-  $("cmsg").textContent = "";
-  $("cdlg").showModal();
-  (GATE === "password" ? $("cpass") : $("cgo")).focus();
+  gateDialog();
 }
 function passwordError(r, d) {
   if (r.status === 429) return d.detail || "Too many wrong passwords; wait a few minutes.";
@@ -1000,7 +1018,7 @@ async function overrideCooldown(ev) {
 async function sendOverride() {
   const r = await fetch(`/api/containers/${encodeURIComponent(COOL_NAME)}/update`, {
     method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
-    body: JSON.stringify({ override_cooldown: true, password: $("cpass").value }) });
+    body: JSON.stringify(COOL_MODE === "approval" ? { approve: true, password: $("cpass").value } : { override_cooldown: true, password: $("cpass").value }) });
   if (r.status === 403 || r.status === 429) { $("cmsg").textContent = passwordError(r, await r.json().catch(() => ({}))); $("cpass").select(); return; }
   if (!r.ok) { const d = await r.json().catch(() => ({})); $("cmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
   $("cdlg").close(); setTimeout(refresh, 300);
