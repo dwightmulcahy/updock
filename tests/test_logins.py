@@ -64,3 +64,31 @@ def test_ui_logins_take_precedence_over_config(tmp_path, monkeypatch):
     lg.set("docker.io", "hub", "hubpw")
     assert registry_credentials("me/private") == ("hub", "hubpw", HUB_KEY)
     assert registry_credentials("docker.io/me/private") == ("hub", "hubpw", HUB_KEY)
+
+
+def test_identitytoken_from_config(tmp_path, monkeypatch):
+    import base64
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    monkeypatch.setattr(docker_api, "CREDENTIAL_PROVIDERS", [])
+    (tmp_path / "config.json").write_text(json.dumps({"auths": {
+        "me.azurecr.io": {"auth": base64.b64encode(b"0000:").decode(), "identitytoken": " RT "},
+        "quay.io": {"username": "qu", "password": "qp"}}}))
+    assert docker_api.registry_identity_token("me.azurecr.io/app") == "RT"
+    assert registry_credentials("me.azurecr.io/app") is None  # the token replaces user/password
+    hdr = json.loads(base64.urlsafe_b64decode(docker_api.registry_auth("me.azurecr.io/app")))
+    assert hdr == {"identitytoken": "RT", "serveraddress": "me.azurecr.io"}
+    assert registry_credentials("quay.io/o/app") == ("qu", "qp", "quay.io")
+    assert docker_api.registry_identity_token("quay.io/o/app") is None
+    lg = RegistryLogins(None)
+    lg.set("me.azurecr.io", "sp", "secret")
+    monkeypatch.setattr(docker_api, "CREDENTIAL_PROVIDERS", [lg.get])
+    assert docker_api.registry_identity_token("me.azurecr.io/app") is None  # UI login wins
+    assert registry_credentials("me.azurecr.io/app") == ("sp", "secret", "me.azurecr.io")
+
+
+def test_config_not_an_object(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    monkeypatch.setattr(docker_api, "CREDENTIAL_PROVIDERS", [])
+    (tmp_path / "config.json").write_text("[]")
+    assert registry_credentials("ghcr.io/a/b") is None
+    assert docker_api.registry_identity_token("ghcr.io/a/b") is None

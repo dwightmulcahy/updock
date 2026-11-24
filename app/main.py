@@ -148,7 +148,9 @@ DISK_WARN = parse_threshold(os.environ["UPDOCK_DISK_WARN"], DISK_MAX) \
     if os.getenv("UPDOCK_DISK_WARN") else 0
 NOTIFIER = EmailNotifier.from_env(ENV, version=VERSION)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
-             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
+             label_enable=env_bool("UPDOCK_LABEL_ENABLE", False),
+             registry=Registry(insecure=env_list("UPDOCK_INSECURE_REGISTRIES"),
+                               ca_file=os.getenv("UPDOCK_REGISTRY_CA", "").strip() or None),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),
              startup_grace=int(os.getenv("UPDOCK_STARTUP_GRACE", "10")),
              digest_check=env_bool("UPDOCK_DIGEST_CHECK", True), notifier=NOTIFIER, store=STORE,
@@ -761,7 +763,8 @@ def about(request):
             "label_enable": up.label_enable, "include_stopped": up.include_stopped,
             "revive_stopped": up.revive_stopped, "health_timeout": up.health_timeout,
             "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
-            "scope": up.scope, "allow": up.allow},
+            "scope": up.scope, "allow": up.allow,
+            "insecure_registries": sorted(getattr(up.registry, "insecure", ()) or ())},
         "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
         "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
     }

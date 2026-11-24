@@ -91,26 +91,59 @@ def _cred_helper(helper, server):
         return None
 
 
-def registry_credentials(repo):
-    """(user, password, serveraddress) from logins saved in the UI, then a mounted docker
-    config.json (inline `auths` entries, `credHelpers` / `credsStore` helpers), or None."""
-    reg = registry_of(repo)
-    for provider in CREDENTIAL_PROVIDERS:
-        creds = provider(reg)
-        if creds:
-            return creds[0], creds[1], reg
+def _config():
     path = os.path.join(os.getenv("DOCKER_CONFIG", "/config"), "config.json")
     try:
         with open(path) as f:
             cfg = json.load(f)
     except (OSError, ValueError):
-        return None
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _config_entry(cfg, reg):
     keys = (reg, reg.replace("https://", "").rstrip("/"))
-    auths = cfg.get("auths", {})
-    entry = auths.get(keys[0]) or auths.get(keys[1])
-    if entry and "auth" in entry:
+    auths = cfg.get("auths") or {}
+    return auths.get(keys[0]) or auths.get(keys[1]) or {}, keys
+
+
+def _ui_login(reg):
+    for provider in CREDENTIAL_PROVIDERS:
+        creds = provider(reg)
+        if creds:
+            return creds
+    return None
+
+
+def registry_identity_token(repo):
+    """OAuth refresh token (`identitytoken`) that `docker login` stores for some registries,
+    e.g. Azure ACR via `az acr login`. A login saved in the UI takes precedence."""
+    reg = registry_of(repo)
+    if _ui_login(reg):
+        return None
+    entry, _ = _config_entry(_config(), reg)
+    return (entry.get("identitytoken") or "").strip() or None
+
+
+def registry_credentials(repo):
+    """(user, password, serveraddress) from logins saved in the UI, then a mounted docker
+    config.json (inline `auths` entries, `credHelpers` / `credsStore` helpers), or None.
+    An entry with an `identitytoken` has no usable password: see registry_identity_token."""
+    reg = registry_of(repo)
+    creds = _ui_login(reg)
+    if creds:
+        return creds[0], creds[1], reg
+    cfg = _config()
+    if not cfg:
+        return None
+    entry, keys = _config_entry(cfg, reg)
+    if entry.get("identitytoken"):
+        return None
+    if "auth" in entry:
         user, _, pw = base64.b64decode(entry["auth"]).decode().partition(":")
         return user, pw, reg
+    if entry.get("username"):
+        return entry["username"], entry.get("password", ""), reg
     helpers = cfg.get("credHelpers", {})
     helper = helpers.get(keys[0]) or helpers.get(keys[1]) or cfg.get("credsStore")
     if helper:
@@ -122,10 +155,14 @@ def registry_credentials(repo):
 
 def registry_auth(repo):
     """Build X-Registry-Auth header value for the Engine API."""
-    creds = registry_credentials(repo)
-    if not creds:
-        return None
-    payload = {"username": creds[0], "password": creds[1], "serveraddress": creds[2]}
+    token = registry_identity_token(repo)
+    if token:
+        payload = {"identitytoken": token, "serveraddress": registry_of(repo)}
+    else:
+        creds = registry_credentials(repo)
+        if not creds:
+            return None
+        payload = {"username": creds[0], "password": creds[1], "serveraddress": creds[2]}
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
 
 

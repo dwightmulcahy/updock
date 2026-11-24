@@ -318,6 +318,8 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_DISK_WARN` | empty | Warning level: a size or a percentage of the max (`80%`) |
 | `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |
 | `UPDOCK_ALLOW` | *(unset)* | Largest version step applied without approval: `patch`, `minor` or `major` (label `updock.allow` overrides) |
+| `UPDOCK_INSECURE_REGISTRIES` | empty | Registries reached over plain HTTP (`registry.lan:5000`, comma-separated) |
+| `UPDOCK_REGISTRY_CA` | empty | PEM file with extra CA certificates for registry checks |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
 | `UPDOCK_DIGEST_CHECK` | `true` | Check the registry digest before pulling; `false` = always pull to check |
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |
@@ -344,7 +346,14 @@ The **excluded** badge's tooltip says which rule applies.
 
 Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 
-Private registries: click **Registries** in the header (or **Add login** on a row that says **auth required**) and enter the registry, username and token — for ghcr.io a GitHub token with `read:packages`, for Docker Hub an access token. Updock checks the login with the registry before saving it, stores it in `/data/registries.json` (mode 600, never shown again), uses it for checks and pulls, and immediately re-checks the containers that were refused. Alternatively mount `~/.docker/config.json` to `/config/config.json`; logins saved in the UI take precedence. Inline `auths` entries work as-is; for `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`).
+Private registries: click **Registries** in the header (or **Add login** on a row that says **auth required**) and enter the registry, username and token — for ghcr.io a GitHub token with `read:packages`, for Docker Hub an access token. Updock checks the login with the registry before saving it, stores it in `/data/registries.json` (mode 600, never shown again), uses it for checks and pulls, and immediately re-checks the containers that were refused. Alternatively mount `~/.docker/config.json` to `/config/config.json`; logins saved in the UI take precedence. Inline `auths` entries work as-is, including the `identitytoken` (OAuth refresh token) that `az acr login` and some other registries write: Updock exchanges it for an access token for checks and passes it to Docker for pulls. For `credHelpers` / `credsStore`, the matching `docker-credential-<name>` binary must also be available inside the container (mount it onto the `PATH`, e.g. `/usr/local/bin`); for AWS ECR that's `docker-credential-ecr-login`.
+
+Registries on your own network:
+
+- Plain HTTP (e.g. `registry.lan:5000`): list them in `UPDOCK_INSECURE_REGISTRIES` (comma-separated `host:port`). Docker itself must allow them too (`insecure-registries` in `daemon.json`), since Docker does the pulls.
+- HTTPS with a private CA or a self-signed certificate: mount the CA (PEM) and point `UPDOCK_REGISTRY_CA` at it, e.g. `./ca.pem:/certs/ca.pem:ro` and `UPDOCK_REGISTRY_CA=/certs/ca.pem`. It's added to the system trust store. For pulls, Docker needs it as well (`/etc/docker/certs.d/<host>/ca.crt`).
+
+On Docker Hub, the version list and `updock.semver` read tags from Docker Hub's API newest first, so the newest releases are always among the 300 kept even in repositories with thousands of tags; for private Hub repositories, or if that API fails, the registry's own (alphabetical) tag list is used.
 
 ## Development
 

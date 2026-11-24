@@ -966,6 +966,7 @@ async function loadAbout() {
     ["Health timeout", `${st.health_timeout}s (startup grace ${st.startup_grace}s)`],
     st.cooldown && ["Cooldown", `${st.cooldown}s`], st.allow && ["Allowed without approval", `${st.allow} updates`], ["Lifecycle hooks", yn(st.hooks)],
     st.scope && ["Scope", st.scope],
+    (st.insecure_registries || []).length && ["Plain-HTTP registries", st.insecure_registries.join(", ")],
     ["Email", n.enabled ? `to ${(n.to || []).join(", ")} via ${n.server}` : "off"],
   ]);
 }
