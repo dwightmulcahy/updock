@@ -110,11 +110,11 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Image size
         run: |
-          size=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+          size=$(docker save "$IMAGE" | wc -c)
           gz=$(docker save "$IMAGE" | gzip -1 | wc -c)
           {
             echo "### Image size"
-            echo "- uncompressed: $((size / 1000000)) MB"
+            echo "- uncompressed (on disk): $((size / 1000000)) MB"
             echo "- compressed (≈ download, gzip): $((gz / 1000000)) MB"
             echo
             echo '```'

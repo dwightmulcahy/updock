@@ -6,8 +6,9 @@ ARG GIT_SHA=
 ENV APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA} \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-# Pick up Debian security fixes released after the pinned base image
-RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+# No `apt-get upgrade` here: upgraded files land in a new layer on top of the old ones
+# (+28 MB). Security fixes come from bumping the pinned base digest (Dependabot), and
+# the CI image scan fails on any fixable HIGH/CRITICAL issue in the meantime.
 COPY requirements.txt .
 # Exact versions with hashes: reproducible builds, tampered packages are rejected
 RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.txt
