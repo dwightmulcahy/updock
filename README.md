@@ -87,6 +87,8 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 
 The header has three tabs: **Containers** (the table), **Logs** (filterable live log, newest first, full height) and **About** (version, Docker engine, and the settings in effect; `GET /api/about`). The tab is kept in the URL (`#logs`, `#about`).
 
+After Updock itself is upgraded, the UI shows **What's new since vX** once per browser: the features, fixes and breaking changes of every release in between, with links to the PRs (also under **⋯ → What's new…**). The notes are bundled into the image at release time (`scripts/build_changelog.py` → `app/changelog.json`, `GET /api/changelog?since=0.5.0`), so no internet access is needed; development builds have none.
+
 The UI follows the system light/dark setting; **⋯ → Theme** switches between auto, light and dark (remembered per browser). On phones the table turns into stacked cards.
 
 **Group by project** (toolbar) groups containers by Compose project. Each project has **Check** and **Update** buttons that run just that project, dependencies first (`depends_on`), with the same rules as **Update all** (cooldown, pinned/monitor-only, health checks). API: `POST /api/projects/{project}/check` or `/update`.

@@ -89,6 +89,8 @@ jobs:
       packages: write   # GHCR push with GITHUB_TOKEN; unused for Docker Hub
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0   # tags and history for the bundled release notes
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
@@ -98,6 +100,8 @@ jobs:
           password: ${{ needs.verify.outputs.registry == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.DOCKERHUB_TOKEN }}
       - id: built
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Bundle release notes for the "What's new" dialog
+        run: python scripts/build_changelog.py --upto "${{ github.ref_name }}" --repository "${{ github.repository }}" --output app/changelog.json
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:

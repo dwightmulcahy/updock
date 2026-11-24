@@ -248,3 +248,38 @@ def test_logs_newest_first(page, up):
     assert texts.index("third message") < texts.index("second message") < texts.index("first message")
     up._log("fourth message", logging.WARNING, "db", "check")  # live: arrives on top
     expect(msgs.first).to_have_text("fourth message", timeout=5000)
+
+
+def test_whats_new_after_upgrade(page, monkeypatch, tmp_path):
+    import json
+
+    from app import main
+    f = tmp_path / "changelog.json"
+    f.write_text(json.dumps({"repository": "me/updock", "releases": [
+        {"version": "0.8.0", "date": "2026-11-24", "internal": 3, "sections": [
+            {"type": "feat", "title": "Features", "items": [{"text": "richer HTML emails (#62)", "sha": "6444ddf"}]}]},
+        {"version": "0.7.0", "date": "2026-11-23", "internal": 0, "sections": [
+            {"type": "fix", "title": "Bug fixes", "items": [{"text": "stop autofill", "sha": "abc"}]}]},
+        {"version": "0.6.0", "date": "2026-11-22", "internal": 0, "sections": []}]}))
+    monkeypatch.setattr(main, "CHANGELOG", f)
+    monkeypatch.setattr(main, "VERSION", "0.8.0")
+    page.evaluate("localStorage.removeItem('updock.seenVersion')")
+    page.reload()  # first visit: remembered, no dialog
+    page.wait_for_function("localStorage.getItem('updock.seenVersion') === '0.8.0'")
+    expect(page.locator("#wdlg")).to_be_hidden()
+    page.evaluate("localStorage.setItem('updock.seenVersion', '0.6.0')")
+    page.reload()  # upgraded from 0.6.0
+    dlg = page.locator("#wdlg")
+    expect(dlg).to_be_visible()
+    expect(page.locator("#wtitle")).to_have_text("What's new since v0.6.0")
+    expect(dlg).to_contain_text("richer HTML emails")
+    expect(dlg).to_contain_text("stop autofill")
+    expect(dlg).not_to_contain_text("v0.6.0 2026")
+    expect(dlg.locator("a[href='https://github.com/me/updock/pull/62']")).to_be_visible()
+    expect(dlg).to_contain_text("+ 3 internal changes")
+    page.get_by_role("button", name="Got it").click()
+    page.reload()  # seen now: no dialog again
+    expect(page.locator("#wdlg")).to_be_hidden()
+    page.click("header button.more")
+    page.get_by_role("button", name="What's new…").click()
+    expect(page.locator("#wtitle")).to_have_text("What's new in Updock")

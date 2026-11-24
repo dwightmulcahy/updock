@@ -692,6 +692,34 @@ def build_info(request):
             "started_at": STARTED_AT}
 
 
+CHANGELOG = Path(__file__).with_name("changelog.json")  # written by the release workflow
+
+
+def _version_key(v):
+    try:
+        return tuple(int(x) for x in str(v).lstrip("v").split("-")[0].split("."))
+    except ValueError:
+        return None
+
+
+@route("/api/changelog", "GET")
+def changelog(request):
+    """Release notes bundled into the image. `since=0.5.0`: only newer versions (for the
+    "What's new" dialog after an upgrade); without it, the latest five."""
+    try:
+        data = json.loads(CHANGELOG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"current": VERSION, "available": False, "repository": "", "releases": []}
+    releases = data.get("releases") or []
+    since = _version_key(q_str(request, "since") or "")
+    if since:
+        releases = [r for r in releases if (_version_key(r.get("version")) or ()) > since]
+    else:
+        releases = releases[:5]
+    return {"current": VERSION, "available": True, "repository": data.get("repository", ""),
+            "releases": releases}
+
+
 @route("/api/about", "GET")
 def about(request):
     """Build, engine and effective settings for the About tab (no secrets)."""
