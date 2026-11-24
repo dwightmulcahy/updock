@@ -17,7 +17,7 @@ from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
                        RegistryError, parse_repo)
-from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump
+from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump, parse as semver_parse
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
@@ -329,9 +329,10 @@ class Updater:
                    "project": (c.get("Labels") or {}).get(COMPOSE_PROJECT),
                    "service": (c.get("Labels") or {}).get(COMPOSE_SERVICE),
                    **st}
+            stub = {"Config": {"Labels": c.get("Labels"), "Image": ref}, "Image": c["ImageID"],
+                    "Name": name}
+            row["version_policy"] = self.version_policy(name, stub)
             if row.get("update_available") and isinstance(row.get("latest"), dict):
-                stub = {"Config": {"Labels": c.get("Labels"), "Image": ref}, "Image": c["ImageID"],
-                        "Name": name}
                 row["cooldown"] = self.cooldown_info(name, stub)
                 row["approval"] = self.approval_info(name, stub)
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
@@ -353,6 +354,9 @@ class Updater:
         if wait:
             raise RateLimited(host, wait, waiting=True)  # don't touch the registry at all
         level = self.semver_level(name, ctr)
+        parsed = semver_parse(split_ref(ref)[1])
+        if self.state[name].get("version_policy_override") and parsed and len(parsed[1]) == 3:
+            level = "major"  # discover out-of-policy releases for approval
         if self.registry and level:
             try:
                 if self._check_semver(name, ctr, ref, level):
@@ -409,10 +413,27 @@ class Updater:
     def allow_for(self, name, ctr):
         """Largest version step applied without approval (label updock.allow, else
         UPDOCK_ALLOW); None: any step."""
+        return self.version_policy(name, ctr)["effective"]
+
+    def version_policy(self, name, ctr):
+        override = self.state.get(name, {}).get("version_policy_override")
         raw = (ctr["Config"].get("Labels") or {}).get(ALLOW_LABEL)
-        if raw is None:
-            return self.allow
-        return self._level(raw, ALLOW_LABEL, name)
+        if override in LEVELS:
+            return {"override": override, "effective": override, "source": "gui"}
+        if raw is not None:
+            return {"override": None, "effective": self._level(raw, ALLOW_LABEL, name),
+                    "source": "label"}
+        return {"override": None, "effective": self.allow, "source": "global"}
+
+    def set_version_policy(self, name, policy):
+        if policy not in (*LEVELS, "inherit"):
+            raise ValueError("invalid version policy")
+        with self.locks[name]:
+            ctr = self.d.inspect(name)
+            self._set(name, version_policy_override=None if policy == "inherit" else policy,
+                      approved=None, notified_approval=None)
+            self._log(f"version policy set to {policy}", logging.WARNING, name, "approval")
+            return self.version_policy(name, ctr)
 
     def approval_info(self, name, ctr):
         """{"from", "to", "level", "allow", "key", "message"} when the known newer image
@@ -426,10 +447,15 @@ class Updater:
         else:
             old, new = (self._image_info(ctr["Image"]) or {}).get("version"), latest.get("version")
         level = jump(old, new)
-        if not level or not exceeds(level, allow):
+        if level and not exceeds(level, allow):
             return None
+        if not level:
+            old_parsed, new_parsed = semver_parse(old), semver_parse(new)
+            if old_parsed and old_parsed == new_parsed:
+                return None  # rebuild of the same known version
+            level = "unknown"
         key = latest.get("digest") or latest.get("id") or new
-        if key == self.state[name].get("approved"):
+        if key and key == self.state[name].get("approved"):
             return None
         return {"from": old, "to": new, "level": level, "allow": allow, "key": key,
                 "message": f"{old} -> {new} is a {level} update; only {allow} updates are "
@@ -441,7 +467,7 @@ class Updater:
         if not info:
             return False
         self._set(name, job="approval", message=info["message"])
-        if self.state[name].get("notified_approval") != info["key"]:
+        if not info["key"] or self.state[name].get("notified_approval") != info["key"]:
             self._log(f"{info['message']}; waiting for approval", logging.WARNING, name,
                       "approval")
             self.notifier.notify("approval", name, info["message"],

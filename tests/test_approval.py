@@ -86,9 +86,9 @@ def test_approve_without_pending_gate_just_updates(aup, fake):
 
 @pytest.mark.parametrize("new,allow,labels", [
     ("1.2.9", "patch", None), ("1.9.0", "minor", None), ("2.0.0", None, None),
-    ("2.0.0", "minor", {"updock.allow": "major"}), ("latest-build", "patch", None),
+    ("2.0.0", "minor", {"updock.allow": "major"}),
 ])
-def test_within_allowed_or_unknown_versions_update(aup, fake, new, allow, labels):
+def test_within_allowed_versions_update(aup, fake, new, allow, labels):
     u = aup(new=new, allow=allow, labels=labels)
     u.update("web", scheduled=True)
     assert u.state["web"]["job"] == "updated" and u.notifier.items[-1][0] == "update"
@@ -121,3 +121,44 @@ def test_semver_tag_following_compares_tags(sfake):
     assert st["job"] == "approval" and st["message"].startswith("1.4.2 -> 2.0.0 is a major update")
     u.update("web", approve=True)
     assert u.state["web"]["job"] == "updated" and sfake.created_body["Image"] == "test/app:2.0.0"
+
+
+@pytest.mark.parametrize("new", ["latest-build", None, "1.2.2"])
+def test_unclassifiable_or_downgrade_requires_approval(aup, fake, new):
+    u = aup(new=new, allow="patch")
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "approval"
+    assert "create" not in fake.calls
+    assert u.notifier.items[0][0] == "approval"
+    u.update("web", approve=True)
+    assert u.state["web"]["job"] == "updated"
+
+
+def test_same_version_rebuild_allowed(aup):
+    u = aup(new="1.2.3", allow="patch")
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "updated"
+
+
+def test_gui_policy_persists_and_overrides_label(aup, fake, tmp_path):
+    from app.store import Store
+    u = aup(new="1.3.0", allow="major", labels={"updock.allow": "minor"})
+    u.store = Store(str(tmp_path))
+    assert u.set_version_policy("web", "patch") == {
+        "override": "patch", "effective": "patch", "source": "gui"}
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "approval"
+    v = Updater(fake, store=u.store, allow="major")
+    assert v.list()[0]["version_policy"]["effective"] == "patch"
+    assert v.set_version_policy("web", "inherit")["effective"] == "minor"
+    with pytest.raises(ValueError):
+        v.set_version_policy("web", "invalid")
+
+
+def test_gui_policy_discovers_newer_major_tag(sfake):
+    sfake.add(semver_ctr(level="patch"))
+    u = Updater(sfake, registry=TagRegistry(), notifier=RecNotifier())
+    u.set_version_policy("web", "patch")
+    u.check_only("web")
+    assert u.state["web"]["job"] == "approval"
+    assert u.state["web"]["target_ref"] == "test/app:2.0.0"

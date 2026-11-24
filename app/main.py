@@ -543,6 +543,20 @@ def cooldown_gate():
     return "password" if UI_PASS else "confirm"
 
 
+@route("/api/containers/{name}/version-policy", "POST")
+def version_policy(request):
+    name = request.path_params["name"]
+    data = body(request, {"policy": (str, ...), "password": (str, "")}, optional=False)
+    require_admin(request, data["password"], name, "version policy change")
+    if data["policy"] not in ("inherit", "patch", "minor", "major"):
+        raise HTTPException(422, "invalid version policy")
+    try:
+        up.d.inspect(name)
+    except Exception as e:
+        raise HTTPException(404, f"no container {name!r}: {e}")
+    return up.set_version_policy(name, data["policy"])
+
+
 @route("/api/containers/{name}/update", "POST")
 def update(request):
     name, force = request.path_params["name"], q_bool(request, "force", False)

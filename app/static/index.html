@@ -343,6 +343,24 @@
       <button class="primary danger" type="submit" id="cgo">Update anyway</button></div>
   </form>
 </dialog>
+<dialog id="pdlg" aria-labelledby="ptitle">
+  <b id="ptitle">Version update policy</b>
+  <p id="pcurrent" class="meta"></p>
+  <form onsubmit="saveVersionPolicy(event)" style="display:grid;gap:8px">
+    <label for="ppolicy">Maximum automatic version update</label>
+    <select id="ppolicy">
+      <option value="inherit">Inherit Compose label / global default</option>
+      <option value="patch">Patch only (1.2.3 → 1.2.x)</option>
+      <option value="minor">Minor and patch (1.2.3 → 1.x.x)</option>
+      <option value="major">Major, minor and patch (any newer version)</option>
+    </select>
+    <p class="meta">Updates outside the policy require approval. GUI settings override Compose labels and survive restarts when persistent storage is configured.</p>
+    <input id="ppass" type="password" placeholder="Updock admin password" autocomplete="new-password" hidden>
+    <div id="pmsg" role="status" class="meta"></div>
+    <div class="row"><button type="button" onclick="document.getElementById('pdlg').close()">Cancel</button>
+      <button id="pgo" class="primary" type="submit">Save policy</button></div>
+  </form>
+</dialog>
 <dialog id="ldlg">
   <b>Registry logins</b>
   <div class="meta" id="lnote" style="margin:6px 0 10px">Used for checks and pulls of private images. Passwords are never shown again.</div>
@@ -638,6 +656,7 @@ function rowMenu(ev, name) {
     { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => c.update_available && c.approval ? openApproval(name) : c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
     { label: "Recreate (same image)", disabled: dis, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
     { label: "Versions…", disabled: dis, run: () => openVersions(name) },
+    { label: "Version update policy…", disabled: dis, run: () => openVersionPolicy(name) },
     ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: dis,
         run: () => confirm(`Roll ${name} back to ${prevLabel(c.previous)}? It will be pinned so scheduled runs don't update it again.`) && post(`/api/containers/${n}/rollback`) }] : []),
     "-",
@@ -1022,6 +1041,36 @@ async function sendOverride() {
   if (r.status === 403 || r.status === 429) { $("cmsg").textContent = passwordError(r, await r.json().catch(() => ({}))); $("cpass").select(); return; }
   if (!r.ok) { const d = await r.json().catch(() => ({})); $("cmsg").textContent = d.detail || `Request failed (${r.status})`; return; }
   $("cdlg").close(); setTimeout(refresh, 300);
+}
+
+let POLICY_NAME = null;
+function openVersionPolicy(name) {
+  const c = DATA.find(x => x.name === name); if (!c) return;
+  POLICY_NAME = name;
+  const p = c.version_policy || {};
+  $("ptitle").textContent = `Version update policy: ${name}`;
+  $("pcurrent").textContent = `Effective: ${p.effective || "unrestricted"} (${p.source || "global"})`;
+  $("ppolicy").value = p.override || "inherit";
+  $("ppass").hidden = GATE !== "password"; $("ppass").required = GATE === "password";
+  $("ppass").value = ""; $("pmsg").textContent = "";
+  $("pdlg").showModal();
+}
+async function saveVersionPolicy(ev) {
+  ev.preventDefault();
+  if ($("pgo").disabled) return;
+  $("pgo").disabled = true;
+  try {
+    const r = await fetch(`/api/containers/${encodeURIComponent(POLICY_NAME)}/version-policy`, {
+      method: "POST", headers: {"X-Updock-Request": "1", "Content-Type": "application/json"},
+      body: JSON.stringify({policy: $("ppolicy").value, password: $("ppass").value})});
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      $("pmsg").textContent = r.status === 403 || r.status === 429 ? passwordError(r, d) : d.detail || `Request failed (${r.status})`;
+      return;
+    }
+    $("pdlg").close(); await refresh();
+  } catch (e) { $("pmsg").textContent = e.message; }
+  finally { $("pgo").disabled = false; }
 }
 
 // ---- deleting a container: type its name, plus the admin password when one is set ----
