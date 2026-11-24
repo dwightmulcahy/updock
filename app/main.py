@@ -1,4 +1,5 @@
 import base64
+from collections import defaultdict, deque
 import ipaddress
 import random
 import re
@@ -392,10 +393,32 @@ class UpdateRequest(BaseModel):
 ALLOW_DELETE = env_bool("UPDOCK_ALLOW_DELETE", True)
 
 
-def admin_ok(request, password):
-    """Gate for risky actions: the admin password when one is set (an API token counts)."""
-    return (not UI_PASS or getattr(request.state, "token", False)
-            or secrets.compare_digest((password or "").encode(), UI_PASS.encode()))
+ADMIN_FAIL_LIMIT, ADMIN_FAIL_WINDOW = 5, 300
+_admin_fails = defaultdict(deque)  # client address -> times of recent wrong passwords
+
+
+def require_admin(request, password, name, action):
+    """Gate for risky actions: the admin password (UPDOCK_PASSWORD, the Updock sign-in
+    password) when one is set; an API token counts. Wrong passwords are logged and, after
+    ADMIN_FAIL_LIMIT within ADMIN_FAIL_WINDOW seconds from one address, refused with 429."""
+    if not UI_PASS or getattr(request.state, "token", False):
+        return
+    who = request.client.host if request.client else "?"
+    fails, now = _admin_fails[who], time.monotonic()
+    while fails and now - fails[0] > ADMIN_FAIL_WINDOW:
+        fails.popleft()
+    if len(fails) >= ADMIN_FAIL_LIMIT:
+        wait = int(ADMIN_FAIL_WINDOW - (now - fails[0])) + 1
+        raise HTTPException(429, f"too many wrong passwords; try again in {wait}s")
+    if secrets.compare_digest((password or "").encode(), UI_PASS.encode()):
+        fails.clear()
+        return
+    fails.append(now)
+    logging.getLogger("updock").warning(
+        "%s: %s refused: %s from %s (%d of %d tries; it's the Updock sign-in password, "
+        "UPDOCK_PASSWORD)", name, action, "empty password" if not password else "wrong admin password",
+        who, len(fails), ADMIN_FAIL_LIMIT, extra={"container": name, "event": "security"})
+    raise HTTPException(403, "wrong admin password")
 
 
 def cooldown_gate():
@@ -407,10 +430,8 @@ def cooldown_gate():
 @app.post("/api/containers/{name}/update")
 def update(name: str, request: Request, force: bool = False, body: UpdateRequest | None = None):
     override = bool(body and body.override_cooldown)
-    if override and not admin_ok(request, body.password):
-        logging.getLogger("updock").warning("%s: cooldown override refused (wrong admin password)",
-                                            name, extra={"container": name, "event": "security"})
-        raise HTTPException(403, "wrong admin password")
+    if override:
+        require_admin(request, body.password, name, "cooldown override")
     if override:
         logging.getLogger("updock").warning("%s: cooldown skipped by %s", name,
                                             getattr(request.state, "user", None) or "admin",
@@ -431,10 +452,7 @@ def delete(name: str, request: Request, body: DeleteRequest | None = None):
     body = body or DeleteRequest()
     if not ALLOW_DELETE:
         raise HTTPException(403, "deleting containers is disabled (UPDOCK_ALLOW_DELETE=false)")
-    if not admin_ok(request, body.password):
-        logging.getLogger("updock").warning("%s: delete refused (wrong admin password)", name,
-                                            extra={"container": name, "event": "security"})
-        raise HTTPException(403, "wrong admin password")
+    require_admin(request, body.password, name, "delete")
     try:
         up.d.inspect(name)
     except Exception as e:

@@ -204,7 +204,7 @@ def test_cooldown_needs_confirmation_and_password(page, up, monkeypatch):
     expect(dlg).to_contain_text("2 hours ago")
     page.fill("#cpass", "wrong")
     page.click("#cgo")
-    expect(page.locator("#cmsg")).to_have_text("Wrong admin password.")
+    expect(page.locator("#cmsg")).to_contain_text("Use the Updock sign-in password")
     assert up.d.ctrs["web"]["Image"] != "sha256:new"
     page.fill("#cpass", "s3cret")
     page.click("#cgo")
@@ -227,7 +227,7 @@ def test_delete_container_needs_name_and_password(page, up, monkeypatch):
     expect(page.locator("#dgo")).to_be_enabled()
     page.fill("#dpass", "nope")
     page.click("#dgo")
-    expect(page.locator("#dmsg")).to_have_text("Wrong admin password.")
+    expect(page.locator("#dmsg")).to_contain_text("Use the Updock sign-in password")
     assert "web" in up.d.ctrs
     page.fill("#dpass", "s3cret")
     page.click("#dgo")

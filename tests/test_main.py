@@ -705,10 +705,37 @@ def test_delete_needs_admin_password_and_can_be_disabled(client, up, monkeypatch
     monkeypatch.setattr(main, "UI_PASS", "s3cret")
     h = _auth("admin", "s3cret")
     r = client.post("/api/containers/web/delete", json={"password": "x"}, headers=h)
-    assert r.status_code == 403 and "delete refused" in caplog.text
+    assert r.status_code == 403 and "delete refused: wrong admin password" in caplog.text
     up.delete.assert_not_called()
     assert client.post("/api/containers/web/delete", json={"password": "s3cret"}, headers=h).status_code == 202
     assert client.get("/api/containers", headers=h).json()["allow_delete"] is True
     monkeypatch.setattr(main, "ALLOW_DELETE", False)
     r = client.post("/api/containers/web/delete", json={"password": "s3cret"}, headers=h)
     assert r.status_code == 403 and "UPDOCK_ALLOW_DELETE" in r.text
+
+
+
+@pytest.fixture(autouse=True)
+def _reset_admin_fails():
+    main._admin_fails.clear()
+    yield
+    main._admin_fails.clear()
+
+
+def test_admin_password_throttled_after_repeated_failures(client, up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    h = _auth("admin", "s3cret")
+    url = "/api/containers/web/update"
+    for i in range(main.ADMIN_FAIL_LIMIT):
+        r = client.post(url, json={"override_cooldown": True, "password": "" if i == 0 else "bad"},
+                        headers=h)
+        assert r.status_code == 403
+    assert "empty password from testclient (1 of 5 tries" in caplog.text
+    assert "wrong admin password from testclient (5 of 5 tries" in caplog.text
+    r = client.post(url, json={"override_cooldown": True, "password": "s3cret"}, headers=h)
+    assert r.status_code == 429 and "try again in" in r.json()["detail"]  # even when right
+    up.update.assert_not_called()
+    t = main.time.monotonic() + main.ADMIN_FAIL_WINDOW + 1  # the window passes
+    monkeypatch.setattr(main.time, "monotonic", lambda: t)
+    r = client.post(url, json={"override_cooldown": True, "password": "s3cret"}, headers=h)
+    assert r.status_code == 202 and not main._admin_fails["testclient"]
