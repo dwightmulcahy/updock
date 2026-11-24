@@ -760,15 +760,16 @@ async function refreshLogs(force) {
   const d = await (await fetch("/api/logs?" + p)).json(), box = $("logs");
   setOptions($("fctr"), d.containers, "All containers", saved.container && !$("fctr").dataset.html ? saved.container : undefined);
   setOptions($("fev"), d.events, "All events", saved.event && !$("fev").dataset.html ? saved.event : undefined);
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 5;
-  box.innerHTML = d.entries.map(e => `<div class="le ${e.level}">
+  // newest first; if you've scrolled down to read, new entries arriving on top don't move you
+  const atTop = box.scrollTop < 5, before = box.scrollHeight;
+  box.innerHTML = [...d.entries].reverse().map(e => `<div class="le ${e.level}">
     <span class="t" title="${new Date(e.t*1000).toLocaleString()}">${ts(e.t)}</span>
     <span class="lv ${e.level}">${e.level}</span>
     <span class="c" onclick="pickContainer('${esc(e.container || "")}')" title="${esc(e.container || e.logger)}">${esc(e.container || "")}${e.event ? ` <span class="ev">${esc(e.event)}</span>` : ""}</span>
     <span class="m">${hl(e.msg, f.q)}${e.exc ? `<details><summary>traceback</summary><pre>${esc(e.exc)}</pre></details>` : ""}</span></div>`).join("")
     || '<div class="le"><span></span><span></span><span></span><span class="m" style="color:var(--dim)">No log entries match these filters.</span></div>';
   $("lcount").textContent = `${d.entries.length} shown`;
-  if (atBottom || force) box.scrollTop = box.scrollHeight;
+  if (atTop || force) box.scrollTop = 0; else box.scrollTop += box.scrollHeight - before;
 }
 function onFilter() { saveFilters(); refreshLogs(true); }
 for (const id of ["flevel", "fctr", "fev"]) $(id).addEventListener("change", onFilter);
@@ -893,7 +894,7 @@ function showTab() {
   document.querySelectorAll(".page-nav a").forEach(a =>
     a.dataset.tab === t ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   if (t === "about") loadAbout();
-  if (t === "logs") { const l = $("logs"); l.scrollTop = l.scrollHeight; }
+  if (t === "logs") $("logs").scrollTop = 0;
 }
 addEventListener("hashchange", showTab);
 showTab();
