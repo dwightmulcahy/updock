@@ -202,6 +202,10 @@
   #dmsg { color:var(--err); }
   #dname, #dpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
   .prot-badge { background:var(--line); }
+  .badge.unhealthy { background:var(--warn); color:#fff; }
+  .hlist { display:grid; gap:2px; font-size:13px; }
+  .hlist .he { display:grid; grid-template-columns:150px 160px 110px 1fr; gap:10px; padding:4px 0; border-bottom:1px solid var(--line); }
+  .hlist .he.unhealthy .st { color:var(--err); } .hlist .he.healthy .st { color:var(--ok); }
   @media (max-width: 640px) {
     header { padding:12px; gap:8px; } header h1 { flex-basis:100%; }
     main { padding:10px; }
@@ -222,6 +226,7 @@
     .msg { max-width:none; }
     #runbar { padding:8px 12px; flex-wrap:wrap; } #runbar .rb-bar { flex:1 0 100%; }
     .le { grid-template-columns:auto 1fr; } .le .c, .le .ev { display:none; }
+    .hlist .he { grid-template-columns:1fr 1fr; }
     dialog { min-width:0; width:calc(100vw - 24px); }
   }
 </style>
@@ -233,6 +238,7 @@
   <nav class="page-nav" aria-label="Sections">
     <a href="#containers" data-tab="containers">Containers</a>
     <a href="#logs" data-tab="logs">Logs</a>
+    <a href="#health" data-tab="health" id="nav-health" hidden>Health</a>
     <a href="#about" data-tab="about">About</a>
   </nav>
   <span class="hspace"></span>
@@ -289,6 +295,14 @@
     </div>
     <div id="logs"></div>
   </section>
+</section>
+<section class="tab" id="tab-health" hidden>
+  <div class="doc-section"><h2>Health monitor</h2><dl class="kv" id="health-sum"></dl>
+    <div class="row" style="margin-top:8px"><button onclick="healthNow()">Check health now</button></div></div>
+  <div class="doc-section"><h2>Unhealthy now</h2><div id="health-now" class="hlist"></div></div>
+  <div class="doc-section"><h2>History</h2>
+    <select id="hctr" title="Container" onchange="loadHealth()"><option value="">All containers</option></select>
+    <div id="health-hist" class="hlist" style="margin-top:8px"></div></div>
 </section>
 <section class="tab" id="tab-about" hidden>
   <div class="doc-section">
@@ -543,7 +557,8 @@ function detailRow(c) {
   const flags = [c.pinned && "pinned in the UI: scheduled runs only check it", c.monitor_only && "label updock.monitor-only: scheduled runs only check it",
                  !c.eligible && `excluded: ${c.excluded}`,
                  c.protected && "label updock.protected: only checked; never stopped, updated, rolled back or deleted",
-                 (c.depends_on || []).length && `depends on ${c.depends_on.join(", ")} (updock.depends-on)`].filter(Boolean);
+                 (c.depends_on || []).length && `depends on ${c.depends_on.join(", ")} (updock.depends-on)`,
+                 c.health && c.health.status === "unhealthy" && `health monitor: ${c.health.failures} failed checks in a row, ${c.health.restarts} restart(s)`].filter(Boolean);
   return `<tr class="detail"><td colspan="4"><div class="dgrid">
     <div><h4>Running</h4><div class="img">${esc(c.image)}</div>${cur}</div>
     <div><h4>Latest available</h4>${lat}</div>
@@ -621,7 +636,8 @@ function rowHtml(c, inGroup) {
     const st = statusText(c), open = OPEN.has(c.name);
     const badges = (c.pinned ? ' <span class="badge pinned-badge">pinned</span>' : "") +
                    (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "") +
-                   (c.protected ? ' <span class="badge prot-badge" title="updock.protected=true: only checked, never stopped or updated">protected</span>' : "");
+                   (c.protected ? ' <span class="badge prot-badge" title="updock.protected=true: only checked, never stopped or updated">protected</span>' : "") +
+                   (c.health && c.health.status === "unhealthy" ? ` <span class="badge unhealthy" title="Health monitor: ${esc(c.health.failures)} failed checks, ${esc(c.health.restarts)} restarts">unhealthy</span>` : "");
     return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""} ${inGroup ? "ingrp" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
       <td><div class="nm"><span class="chev">▶</span>${statusIcon(c, st)}${esc(c.name)}${badges}</div>
           <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div>
@@ -752,6 +768,7 @@ async function refresh() {
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     if (d.user) nx.textContent += ` · ${d.user}`;
     DATA = d.containers; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
+    $("nav-health").hidden = !DATA.some(c => "health" in c);
     RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;
     if (RUN) optimistic = null;
     renderRun();
@@ -930,14 +947,40 @@ setInterval(() => { if (live) refresh(); }, 30000);   // slow safety refresh whe
   if (window.ResizeObserver) new ResizeObserver(set).observe(top); else addEventListener("resize", set);
 })();
 
-// ---- tabs (Containers / Logs / About), kept in the URL hash ----
-const TABS = ["containers", "logs", "about"];
+// ---- health monitor tab ----
+async function loadHealth() {
+  const [st, h] = await Promise.all([fetch("/api/health").then(r => r.json()),
+    fetch("/api/health/history?limit=500" + ($("hctr").value ? `&container=${encodeURIComponent($("hctr").value)}` : "")).then(r => r.json())]).catch(() => [null, null]);
+  if (!st) return;
+  const dur = s => s >= 3600 ? `${Math.round(s / 3600)}h` : s >= 60 ? `${Math.round(s / 60)}m` : `${s}s`;
+  kv("health-sum", [
+    ["Checks", st.enabled ? `every ${dur(st.interval)}` : "off (set UPDOCK_HEALTH_INTERVAL)"],
+    ["Notify after", st.notify_after > 0 ? `${st.notify_after} failed checks in a row` : "never"],
+    ["Restart after", st.restart_after > 0 ? `${st.restart_after} failed checks, up to ${st.restart_attempts} times` : "never (label updock.health.restart-after per container)"],
+    ["Restarts since start", String(st.restarts)],
+    ["Last pass", st.last_tick ? ago(st.last_tick) : "—"],
+  ]);
+  const bad = Object.entries(st.containers || {}).filter(([, v]) => v.status === "unhealthy");
+  $("health-now").innerHTML = bad.length ? bad.map(([n, v]) => `<div class="he unhealthy"><span>${esc(n)}</span><span class="st">unhealthy</span>
+      <span>${esc(v.failures)} checks</span><span class="meta">${esc(v.restarts)} restart(s) · since ${ago(v.since)}</span></div>`).join("")
+    : '<div class="meta">All monitored containers are healthy.</div>';
+  setOptions($("hctr"), Object.keys(st.containers || {}).sort(), "All containers");
+  $("health-hist").innerHTML = (h.entries || []).map(e => `<div class="he ${esc(e.status)}">
+      <span title="${new Date(e.t * 1000).toLocaleString()}">${ts(e.t)}</span><span>${esc(e.container)}</span>
+      <span class="st">${esc(e.status)}${e.restart ? " · restart" : ""}${e.notified ? " · notified" : ""}</span>
+      <span class="meta">${esc(e.note || "")}</span></div>`).join("") || '<div class="meta">No health changes recorded.</div>';
+}
+async function healthNow() { await post("/api/health/check"); setTimeout(loadHealth, 800); }
+
+// ---- tabs (Containers / Logs / Health / About), kept in the URL hash ----
+const TABS = ["containers", "logs", "health", "about"];
 function showTab() {
   const t = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "containers";
   for (const n of TABS) $(`tab-${n}`).hidden = n !== t;
   document.querySelectorAll(".page-nav a").forEach(a =>
     a.dataset.tab === t ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   if (t === "about") loadAbout();
+  if (t === "health") loadHealth();
   if (t === "logs") $("logs").scrollTop = 0;
 }
 addEventListener("hashchange", showTab);
@@ -971,6 +1014,7 @@ async function loadAbout() {
     ["Health timeout", `${st.health_timeout}s (startup grace ${st.startup_grace}s)`],
     st.cooldown && ["Cooldown", `${st.cooldown}s`], st.allow && ["Allowed without approval", `${st.allow} updates`], ["Lifecycle hooks", yn(st.hooks)],
     st.scope && ["Scope", st.scope],
+    ["Health monitor", st.health_monitor ? `every ${st.health_monitor}s` : "off"],
     (st.insecure_registries || []).length && ["Plain-HTTP registries", st.insecure_registries.join(", ")],
     ["Email", n.enabled ? `to ${(n.to || []).join(", ")} via ${n.server}` : "off"],
   ]);

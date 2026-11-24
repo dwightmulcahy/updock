@@ -85,7 +85,7 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 - Search by name or image, filter (**Updates**, **Problems**, **Running**, **Stopped**, **Excluded**, with counts) and sort (needs attention first, name, last checked, recently updated); the choice is remembered. Narrow screens drop the "checked" column.
 
 
-The header has three tabs: **Containers** (the table), **Logs** (filterable live log, newest first, full height) and **About** (version, Docker engine, and the settings in effect; `GET /api/about`). The tab is kept in the URL (`#logs`, `#about`).
+The header has these tabs: **Containers** (the table), **Logs** (filterable live log, newest first, full height), **Health** (only with the [health monitor](#health-monitor) on) and **About** (version, Docker engine and the settings in effect; `GET /api/about`). The tab is kept in the URL (`#logs`, `#health`, `#about`).
 
 After Updock itself is upgraded, the UI shows **What's new since vX** once per browser: the features, fixes and breaking changes of every release in between, with links to the PRs (also under **⋯ → What's new…**). The notes are bundled into the image at release time (`scripts/build_changelog.py` → `app/changelog.json`, `GET /api/changelog?since=0.5.0`), so no internet access is needed; development builds have none.
 
@@ -139,6 +139,17 @@ labels:
   updock.hook.pre-update: "pg_dump -U app app > /backups/before-update.sql"
   updock.hook.pre-update-timeout: "10m"
 ```
+
+### Health monitor
+
+With `UPDOCK_HEALTH_INTERVAL` (e.g. `3m`), Updock also watches Docker healthchecks between updates. Each pass reads every running container's health from the container list (one request, not one per container); containers without a healthcheck, and containers Updock is updating at that moment, are skipped.
+
+- After `UPDOCK_HEALTH_NOTIFY_AFTER` (default `3`) unhealthy checks in a row you get an `unhealthy` notification, once per episode, and a `healthy` one when it recovers. `0` turns these off.
+- With `UPDOCK_HEALTH_RESTART_AFTER=N` (or per container, label `updock.health.restart-after=N`; `0` = never) the container is restarted every N failed checks, at most `UPDOCK_HEALTH_RESTART_ATTEMPTS` (default `3`) times per episode. Protected containers and Updock itself are never restarted.
+- Label `updock.health.monitor=false` leaves a container out. `UPDOCK_SCOPE` applies as for updates.
+- Status changes, restarts and notifications are kept for `UPDOCK_HEALTH_HISTORY` (default `7d`) in `/data/health.jsonl` and shown on the **Health** tab, with a **Health** badge on the row. API: `GET /api/health`, `GET /api/health/history?container=web&limit=200`, `POST /api/health/check` (run a pass now).
+
+A container recreated under the same name (by an update, or by you) starts with a clean count.
 
 ### Disk space guard
 
@@ -213,7 +224,7 @@ After an update to a new image, the superseded image is deleted: any other tags 
 
 ## Monitoring
 
-`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown|protected|rate_limited"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
+`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown|protected|rate_limited"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, build info, and with the health monitor on `updock_container_unhealthy{container}` and `updock_health_restarts_total`. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
 
 Probes without auth: `/livez` (process up), `/readyz` (Docker reachable, else 503; used by the image's `HEALTHCHECK`), `/startupz` (scheduler started), plus `/health` (version).
 
@@ -238,7 +249,7 @@ Emails are HTML (with a plain-text copy for clients that prefer it): one card pe
 | `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
 | `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
 | `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
-| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,approval,disk` | Also: `deploy`, `delete` |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,approval,disk,unhealthy,healthy` | Also: `deploy`, `delete` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
@@ -271,6 +282,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Registry details for one tag | `GET /api/containers/{name}/tags/{tag}` |
 | Pin / unpin | `POST /api/containers/{name}/pin?pinned=true\|false` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
+| Health monitor | `GET /api/health`, `GET /api/health/history`, `POST /api/health/check` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 | Image storage vs. limits | `GET /api/disk` |
@@ -323,6 +335,11 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_DISK_WARN` | empty | Warning level: a size or a percentage of the max (`80%`) |
 | `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |
 | `UPDOCK_ALLOW` | *(unset)* | Largest version step applied without approval: `patch`, `minor` or `major` (label `updock.allow` overrides) |
+| `UPDOCK_HEALTH_INTERVAL` | `0` | [Health monitor](#health-monitor) pass every (`3m`, `30s`); `0` = off |
+| `UPDOCK_HEALTH_NOTIFY_AFTER` | `3` | Unhealthy checks in a row before an `unhealthy` notification; `0` = never |
+| `UPDOCK_HEALTH_RESTART_AFTER` | `0` | Restart after this many failed checks; `0` = never (label `updock.health.restart-after`) |
+| `UPDOCK_HEALTH_RESTART_ATTEMPTS` | `3` | Restarts per unhealthy episode |
+| `UPDOCK_HEALTH_HISTORY` | `7d` | How long health history is kept |
 | `UPDOCK_INSECURE_REGISTRIES` | empty | Registries reached over plain HTTP (`registry.lan:5000`, comma-separated) |
 | `UPDOCK_REGISTRY_CA` | empty | PEM file with extra CA certificates for registry checks |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |

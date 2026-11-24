@@ -33,6 +33,7 @@ from .docker_api import Docker, normalize_registry
 from .logins import RegistryLogins, display_host
 from .registry import RegistryAuthError
 from .events import EventHub
+from .health import HealthMonitor
 from . import events as eventsmod
 from .notify import EmailNotifier
 from .registry import Registry
@@ -164,6 +165,13 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              revive_stopped=env_bool("UPDOCK_REVIVE_STOPPED", False),
              cosign_data_dir=STORE.dir if STORE else None,
              allow=os.getenv("UPDOCK_ALLOW"))
+HEALTH = HealthMonitor(
+    up.d, up, NOTIFIER, data_dir=STORE.dir if STORE else None,
+    interval=parse_duration(os.getenv("UPDOCK_HEALTH_INTERVAL", "0")),
+    notify_after=int(os.getenv("UPDOCK_HEALTH_NOTIFY_AFTER", "3")),
+    restart_after=int(os.getenv("UPDOCK_HEALTH_RESTART_AFTER", "0")),
+    restart_attempts=int(os.getenv("UPDOCK_HEALTH_RESTART_ATTEMPTS", "3")),
+    history_seconds=parse_duration(os.getenv("UPDOCK_HEALTH_HISTORY", "7d")))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -232,6 +240,12 @@ async def lifespan(_):
             "auto-update" if AUTO_UPDATE else "check only",
             f", maintenance window {WINDOW}" if WINDOW else "", extra={"event": "run"})
         threading.Thread(target=scheduler, daemon=True).start()
+    if HEALTH.enabled:
+        logging.getLogger("updock").info(
+            "health monitor: every %ss, notify after %s failures%s", HEALTH.interval,
+            HEALTH.notify_after, f", restart after {HEALTH.restart_after}"
+            if HEALTH.restart_after else "", extra={"event": "health"})
+        threading.Thread(target=HEALTH.loop, daemon=True).start()
     STARTED["done"] = True
     yield
 
@@ -453,7 +467,8 @@ def startupz(request):
 
 @route("/metrics", "GET")
 def metrics(request):
-    return PlainTextResponse(metricsmod.render(up, up.list(), VERSION, COMMIT, LOG_COUNTS),
+    return PlainTextResponse(metricsmod.render(up, up.list(), VERSION, COMMIT, LOG_COUNTS,
+                                               health=HEALTH),
                              media_type="text/plain; version=0.0.4")
 
 
@@ -462,9 +477,17 @@ def index(request):
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+def with_health(rows):
+    if HEALTH.enabled:
+        for r in rows:
+            r["health"] = HEALTH.state.get(r.get("name"))
+    return rows
+
+
 @route("/api/containers", "GET")
 def containers(request):
-    return {"containers": up.list(), "next_run": next_run["t"], "auto_update": AUTO_UPDATE,
+    return {"containers": with_health(up.list()), "next_run": next_run["t"],
+            "auto_update": AUTO_UPDATE,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
             "version": VERSION, "user": getattr(request.state, "user", None),
             "cooldown_gate": cooldown_gate(), "allow_delete": ALLOW_DELETE}
@@ -775,7 +798,8 @@ def about(request):
             "revive_stopped": up.revive_stopped, "health_timeout": up.health_timeout,
             "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
             "scope": up.scope, "allow": up.allow,
-            "insecure_registries": sorted(getattr(up.registry, "insecure", ()) or ())},
+            "insecure_registries": sorted(getattr(up.registry, "insecure", ()) or ()),
+            "health_monitor": HEALTH.interval or None},
         "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
         "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
     }
@@ -800,6 +824,22 @@ def check_all(request):
     if up.run:
         raise HTTPException(409, "a run is already in progress")
     return bg(up.run_all, False)
+
+
+@route("/api/health", "GET")
+def health_status(request):
+    return HEALTH.status()
+
+
+@route("/api/health/history", "GET")
+def health_history(request):
+    return {"entries": HEALTH.query(q_str(request, "container"),
+                                    min(max(q_num(request, "limit", 200), 0), 5000))}
+
+
+@route("/api/health/check", "POST")
+def health_check(request):
+    return bg(HEALTH.tick)
 
 
 @route("/api/projects/{project}/{action}", "POST")

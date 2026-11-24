@@ -318,3 +318,19 @@ def test_protected_container(page, up):
     row(page, "db").locator("button.more").click()
     expect(page.locator("#menu").get_by_role("button", name=re.compile("^Update"))).to_be_disabled()
     page.keyboard.press("Escape")
+
+
+def test_health_tab(page, up, monkeypatch):
+    from app import main
+    from app.health import HealthMonitor
+    hm = HealthMonitor(up.d, up, main.NOTIFIER, interval=60)
+    hm.state["web"] = {"status": "unhealthy", "failures": 4, "restarts": 1, "notified": True,
+                       "since": 0, "gave_up": False}
+    hm._record("web", "unhealthy", restart=True, note="restarted after 4 failed healthchecks")
+    monkeypatch.setattr(main, "HEALTH", hm)
+    page.reload()
+    expect(row(page, "web")).to_contain_text("unhealthy")
+    page.get_by_role("link", name="Health").click()
+    expect(page.locator("#health-now")).to_contain_text("web")
+    expect(page.locator("#health-hist")).to_contain_text("restarted after 4 failed healthchecks")
+    expect(page.locator("#health-sum")).to_contain_text("every 1m")
