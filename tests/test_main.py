@@ -784,3 +784,22 @@ def test_unknown_routes_and_methods_are_json(client):
     assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
     r = client.get("/api/containers/web/update")
     assert r.status_code == 405 and r.json() == {"detail": "Method Not Allowed"}
+
+
+# ---------- bundled changelog ----------
+
+def test_changelog_endpoint(client, monkeypatch, tmp_path):
+    f = tmp_path / "changelog.json"
+    monkeypatch.setattr(main, "CHANGELOG", f)
+    monkeypatch.setattr(main, "VERSION", "0.8.0")
+    assert client.get("/api/changelog").json() == {"current": "0.8.0", "available": False,
+                                                  "repository": "", "releases": []}
+    rels = [{"version": v} for v in ("0.8.0", "0.7.0", "0.6.0", "0.5.0", "0.4.0", "0.3.0")]
+    f.write_text(json.dumps({"repository": "me/updock", "releases": rels}))
+    d = client.get("/api/changelog?since=v0.6.0").json()
+    assert [r["version"] for r in d["releases"]] == ["0.8.0", "0.7.0"] and d["repository"] == "me/updock"
+    assert len(client.get("/api/changelog").json()["releases"]) == 5
+    assert len(client.get("/api/changelog?since=garbage").json()["releases"]) == 5
+    f.write_text("{not json")
+    assert client.get("/api/changelog").json()["available"] is False
+    assert main._version_key("1.2.3-rc1") == (1, 2, 3) and main._version_key("x") is None
