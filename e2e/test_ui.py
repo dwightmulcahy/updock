@@ -308,3 +308,13 @@ def test_whats_new_after_upgrade(page, monkeypatch, tmp_path):
     page.click("header button.more")
     page.get_by_role("button", name="What's new…").click()
     expect(page.locator("#wtitle")).to_have_text("What's new in Updock")
+
+
+def test_protected_container(page, up):
+    up.d.ctrs["db"]["Config"]["Labels"]["updock.protected"] = "true"
+    page.reload()
+    expect(row(page, "db")).to_contain_text("protected")
+    expect(row(page, "db").get_by_role("button", name="Check")).to_be_visible()
+    row(page, "db").locator("button.more").click()
+    expect(page.locator("#menu").get_by_role("button", name=re.compile("^Update"))).to_be_disabled()
+    page.keyboard.press("Escape")

@@ -2401,3 +2401,148 @@ def test_error_email_context_survives_missing_container(fake):
     u = Updater(fake, notifier=rec)
     u.state["ghost"]["ref"] = "test/ghost:1"
     assert u._context("ghost") == {"image": "test/ghost:1"}
+
+
+# ---------- updock.protected, updock.depends-on, extra hooks ----------
+
+from app.updater import UnhealthyError, is_protected, label_depends  # noqa: E402
+
+
+def protect(c):
+    c["Config"]["Labels"]["updock.protected"] = "true"
+    return c
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, {}), ("", {}), ("db", {"db": False}),
+    ("db:restart, /cache , other:RESTART,:x", {"db": True, "cache": False, "other": True}),
+])
+def test_label_depends(value, expected):
+    assert label_depends({"updock.depends-on": value} if value is not None else None) == expected
+
+
+def test_is_protected():
+    assert is_protected({"updock.protected": " Yes "}) and not is_protected({"updock.protected": "0"})
+    assert not is_protected(None)
+
+
+def test_protected_refuses_manual_actions(up, fake):
+    protect(fake.add(make_ctr()))
+    publish_new(fake)
+    fake.tags["test/app:1.0"] = OLD_IMG
+    up.state["web"]["previous"] = {"ref": "test/app:1.0", "image": OLD_IMG}
+    for action in (lambda: up.update("web", force=True), lambda: up.deploy("web", "1.0"),
+                   lambda: up.rollback("web"), lambda: up.delete("web")):
+        action()
+        assert fake.ctrs["web"]["Id"] == CID and "stop" not in fake.calls
+        assert "is protected (updock.protected=true)" in up.state["web"]["message"]
+    assert up.counters["result_protected"] == 4
+    assert up.protected("web") and not up.protected("missing")
+    assert up.list()[0]["protected"] is True
+
+
+def test_protected_is_only_checked_by_scheduled_runs(up, fake, monkeypatch):
+    protect(fake.add(make_ctr()))
+    seen = []
+    monkeypatch.setattr(up, "check_only", lambda n, scheduled=False: seen.append(("check", n)))
+    monkeypatch.setattr(up, "update", lambda n, scheduled=False: seen.append(("update", n)))
+    up.run_all(update=True)
+    assert seen == [("check", "web")]
+
+
+def test_protected_network_dependent_blocks_update(up, fake):
+    fake.add(make_ctr())
+    protect(add_dependent(fake))
+    publish_new(fake)
+    up.update("web")
+    assert "app shares web's network and is protected" in up.state["web"]["message"]
+    assert "stop" not in fake.calls and fake.ctrs["web"]["Id"] == CID
+
+
+def test_depends_on_label_orders_across_projects(fake, monkeypatch):
+    u = Updater(fake)
+    web = compose_ctr(fake, "web", "web", project="front")
+    web["Config"]["Labels"]["updock.depends-on"] = "db,ghost"
+    compose_ctr(fake, "db", "db", project="back")
+    seen = []
+    monkeypatch.setattr(u, "update", lambda n, scheduled=False: seen.append(n))
+    u.run_all()
+    assert seen == ["db", "web"]
+    assert u.list()[1]["depends_on"] == ["db", "ghost"]
+
+
+def test_depends_on_label_restart(up, fake):
+    fake.add(make_ctr("db", cid="d" * 64))
+    a = fake.add(make_ctr("api", cid="a" * 64))
+    a["Config"]["Labels"]["updock.depends-on"] = "db:restart"
+    b = fake.add(make_ctr("worker", cid="b" * 64))
+    b["Config"]["Labels"]["updock.depends-on"] = "db"
+    p = protect(fake.add(make_ctr("audit", cid="c" * 64)))
+    p["Config"]["Labels"]["updock.depends-on"] = "db:restart"
+    up.update("db", force=True)
+    assert fake.restarted == ["a" * 64]
+    assert any(e["container"] == "api" and "updock.depends-on restart" in e["msg"] for e in up.logs)
+    assert any(e["container"] == "audit" and "protected" in e["msg"] for e in up.logs)
+
+
+def test_pre_stop_runs_first_and_for_network_dependents(kup, fake):
+    hooked(fake, pre_stop="ps", pre_update="pu")
+    dep = add_dependent(fake)
+    dep["Config"]["Labels"]["updock.hook.pre-stop"] = "dep-ps"
+    kup.update("web", force=True)
+    assert [argv[-1] for _, argv, _ in fake.execs] == ["ps", "dep-ps", "pu"]
+
+
+@pytest.mark.parametrize("code,job,text", [(75, "skipped", "pre-stop hook in app asked to skip"),
+                                           (3, "error", "pre-stop hook in app exited 3")])
+def test_dependent_pre_stop_failure_aborts(kup, fake, code, job, text):
+    hooked(fake)
+    dep = add_dependent(fake)
+    dep["Config"]["Labels"]["updock.hook.pre-stop"] = "dep-ps"
+    fake.exec_codes["dep-ps"] = code
+    kup.update("web", force=True)
+    assert kup.state["web"]["job"] == job and text in kup.state["web"]["message"]
+    assert "stop" not in fake.calls
+
+
+def test_pre_stop_failure_skips_dependent_restart(kup, fake):
+    fake.add(make_ctr("db", cid="d" * 64))
+    a = fake.add(make_ctr("api", cid="a" * 64))
+    a["Config"]["Labels"].update({"updock.depends-on": "db:restart", "updock.hook.pre-stop": "drain"})
+    fake.exec_codes["drain"] = 1
+    kup.update("db", force=True)
+    assert not getattr(fake, "restarted", None)
+    assert any("pre-stop hook exited 1" in e["msg"] for e in kup.logs)
+
+
+def test_rollback_hooks(kup, fake, monkeypatch):
+    hooked(fake, pre_rollback="prb", post_rollback="porb")
+    monkeypatch.setattr(kup, "_verify", lambda *a, **k: (_ for _ in ()).throw(UnhealthyError("bad")))
+    kup.update("web", force=True)
+    assert kup.state["web"]["job"] == "rolled-back"
+    runs = [(cid, argv[-1]) for cid, argv, _ in fake.execs]
+    assert runs[0][1] == "prb" and runs[0][0] != CID  # in the failed new container
+    assert runs[1] == (CID, "porb")                    # in the restored old one
+
+
+def test_rollback_hook_inspect_failure_ignored(kup, fake, monkeypatch):
+    hooked(fake, pre_rollback="prb")
+    fake.fail["start"] = RuntimeError("boom")  # new container never starts
+    real = fake.inspect
+
+    def inspect(cid):
+        if cid.startswith("new"):
+            raise RuntimeError("gone")
+        return real(cid)
+    monkeypatch.setattr(fake, "inspect", inspect)
+    kup.update("web", force=True)
+    assert any("pre-rollback hook skipped: gone" in e["msg"] for e in kup.logs)
+
+
+def test_dependent_failure_skips_rollback_hooks(kup, fake):
+    dep = add_dependent(fake)
+    dep["Config"]["Labels"]["updock.hook.pre-rollback"] = "prb"
+    fake.fail["start"] = RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        kup._recreate(fake.inspect("app"), cleanup=False, network_parent="p" * 64, start=True)
+    assert fake.execs == []

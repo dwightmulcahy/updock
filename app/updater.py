@@ -29,6 +29,8 @@ MONITOR_ONLY_LABEL = "updock.monitor-only"
 REVIVE_LABEL = "updock.revive"
 HEALTH_TIMEOUT_LABEL = "updock.health-timeout"
 HEALTH_URL_LABEL = "updock.health-url"
+PROTECTED_LABEL = "updock.protected"
+DEPENDS_LABEL = "updock.depends-on"
 TRUE = {"1", "true", "yes", "on"}
 SELF_LABEL = "updock.self"
 IMAGE_DEFAULT_KEYS = ("Env", "WorkingDir", "User", "ExposedPorts", "Volumes",
@@ -53,14 +55,32 @@ def compose_depends(labels):
     return out
 
 
+def label_depends(labels):
+    """Label updock.depends-on='db,cache:restart' -> {container name: restart?}. Works
+    across Compose projects and for plain `docker run` containers."""
+    out = {}
+    for item in str((labels or {}).get(DEPENDS_LABEL, "")).split(","):
+        name, _, opt = item.strip().partition(":")
+        if name:
+            out[name.lstrip("/")] = opt.strip().lower() == "restart"
+    return out
+
+
+def is_protected(labels):
+    return str((labels or {}).get(PROTECTED_LABEL, "")).strip().lower() in TRUE
+
+
 def compose_order(containers):
-    """Order container list entries so Compose dependencies come before dependents
-    (stable otherwise; cycles and unknown services keep their original order)."""
-    by_key = {}
+    """Order container list entries so dependencies (Compose depends_on, and the
+    updock.depends-on label) come before dependents (stable otherwise; cycles and
+    unknown services keep their original order)."""
+    by_key, by_name = {}, {}
     for c in containers:
         labels = c.get("Labels") or {}
         if labels.get(COMPOSE_PROJECT) and labels.get(COMPOSE_SERVICE):
             by_key.setdefault((labels[COMPOSE_PROJECT], labels[COMPOSE_SERVICE]), []).append(c)
+        for n in c.get("Names") or ():
+            by_name[n.lstrip("/")] = c
     out, done, visiting = [], set(), set()
 
     def visit(c):
@@ -72,6 +92,9 @@ def compose_order(containers):
         for svc in compose_depends(labels):
             for dep in by_key.get((labels.get(COMPOSE_PROJECT), svc), []):
                 visit(dep)
+        for dep_name in label_depends(labels):
+            if dep_name in by_name:
+                visit(by_name[dep_name])
         visiting.discard(cid)
         done.add(cid)
         out.append(c)
@@ -104,6 +127,15 @@ class HookSkip(Exception):
 
 class UnhealthyError(Exception):
     """The replacement container failed its healthcheck or exited during startup."""
+
+
+class ProtectedError(Exception):
+    """The container (or one that shares its network) has updock.protected=true."""
+
+
+def protected_message(name):
+    return (f"{name} is protected ({PROTECTED_LABEL}=true): Updock only checks it and "
+            "never stops, updates, rolls back or deletes it")
 
 
 def build_create_body(ctr, old_img_cfg, image_ref=None):
@@ -308,8 +340,19 @@ class Updater:
 
     def monitor_only(self, name, labels):
         """Pinned in the UI or labelled updock.monitor-only: scheduled runs only check."""
-        return bool(self.state.get(name, {}).get("pinned")) or \
+        return bool(self.state.get(name, {}).get("pinned")) or is_protected(labels) or \
             str((labels or {}).get(MONITOR_ONLY_LABEL, "")).lower() in TRUE
+
+    def protected(self, name):
+        """True if the container carries updock.protected=true (False if it's gone)."""
+        try:
+            return is_protected(self.d.inspect(name)["Config"].get("Labels"))
+        except Exception:
+            return False
+
+    def _refuse_protected(self, ctr):
+        if is_protected(ctr["Config"].get("Labels")):
+            raise ProtectedError(protected_message(ctr["Name"].lstrip("/")))
 
     def list(self):
         out = []
@@ -325,6 +368,8 @@ class Updater:
                    "excluded": why,
                    "monitor_only": str((c.get("Labels") or {}).get(MONITOR_ONLY_LABEL, "")).lower()
                    in TRUE,
+                   "protected": is_protected(c.get("Labels")),
+                   "depends_on": sorted(label_depends(c.get("Labels"))),
                    "current": self._image_info(c["ImageID"]), "queued": name in self.queue,
                    "project": (c.get("Labels") or {}).get(COMPOSE_PROJECT),
                    "service": (c.get("Labels") or {}).get(COMPOSE_SERVICE),
@@ -614,6 +659,10 @@ class Updater:
             self.counters["result_rate_limited"] += 1
             self._set(name, job="rate-limited", message=str(e))
             self._log(str(e), logging.INFO if e.waiting else logging.WARNING, name, "rate-limit")
+        except ProtectedError as e:
+            self.counters["result_protected"] += 1
+            self._set(name, message=str(e))
+            self._log(str(e), logging.WARNING, name, "protected")
         except HookSkip as e:
             self.counters["result_skipped"] += 1
             self._set(name, job="skipped", message=str(e))
@@ -654,6 +703,7 @@ class Updater:
             labels = ctr["Config"].get("Labels") or {}
             if labels.get(SELF_LABEL) == "true" or (self.self_id and ctr["Id"].startswith(self.self_id)):
                 raise RuntimeError("Updock won't delete its own container")
+            self._refuse_protected(ctr)
             self._set(name, job="deleting", message=f"Removing {name}")
             if ctr["State"].get("Running"):
                 self.d.stop(ctr["Id"], ctr["Config"].get("StopTimeout") or 10)
@@ -694,6 +744,7 @@ class Updater:
         A step beyond updock.allow / UPDOCK_ALLOW waits until `approve` (same gate)."""
         def job():
             self.state[name]["action"] = "update"
+            self._refuse_protected(self.d.inspect(name))
             try:
                 ctr, avail = self.check(name)
             except Exception as e:
@@ -971,6 +1022,7 @@ class Updater:
         def job():
             self.state[name]["action"] = "deploy"
             ctr = self.d.inspect(name)
+            self._refuse_protected(ctr)
             new_ref = f"{base_repo(ctr['Config']['Image'])}:{tag}"
             self._set(name, job="pulling", step="pull", message=f"Pulling {new_ref}")
             self._pull_image(name, new_ref)
@@ -1031,6 +1083,7 @@ class Updater:
             if not prev:
                 raise RuntimeError("no earlier version recorded for this container")
             ctr = self.d.inspect(name)
+            self._refuse_protected(ctr)
             back = self._previous_of(ctr)
             ref = prev["ref"]
             label = prev.get("version") or (prev.get("id") or prev["image"][7:19])
@@ -1103,17 +1156,25 @@ class Updater:
         was_running = orig_running if start is None else start  # start the new one?
         timeout = ctr["Config"].get("StopTimeout") or 10
 
+        deps = self.dependents(old_id, name)
+        dep_running = {d["Id"]: d["State"]["Running"] for d in deps}
         if not network_parent:
-            code = self.run_hook(ctr, "pre-update")
-            if code == HOOK_SKIP:
-                raise HookSkip("pre-update hook asked to skip this update (exit 75)")
-            if code not in (None, 0):
-                raise HookError(f"pre-update hook exited {code}; update aborted")
+            for d in deps:  # before anything is stopped
+                if is_protected(d["Config"].get("Labels")):
+                    raise ProtectedError(f"{d['Name'].lstrip('/')} shares {name}'s network and "
+                                         f"is protected ({PROTECTED_LABEL}=true), so {name} "
+                                         "can't be recreated")
+            for hook, target in [("pre-stop", ctr)] + [("pre-stop", d) for d in deps] + \
+                    [("pre-update", ctr)]:
+                code = self.run_hook(target, hook)
+                who = "" if target is ctr else f" in {target['Name'].lstrip('/')}"
+                if code == HOOK_SKIP:
+                    raise HookSkip(f"{hook} hook{who} asked to skip this update (exit 75)")
+                if code not in (None, 0):
+                    raise HookError(f"{hook} hook{who} exited {code}; update aborted")
 
         carried = self._collect_copy_files(ctr)  # before stopping: current contents
 
-        deps = self.dependents(old_id, name)
-        dep_running = {d["Id"]: d["State"]["Running"] for d in deps}
         for d in deps:
             dname = d["Name"].lstrip("/")
             self._log(f"uses {name}'s network; stopping until {name} is back", container=dname,
@@ -1150,12 +1211,16 @@ class Updater:
         except Exception as e:
             self._log(f"{e}; rolling back to previous container", logging.ERROR, name, "rollback")
             if new_id:
+                if not network_parent:
+                    self._safe_hook(new_id, "pre-rollback")  # the failed one, if it still runs
                 self.d.remove(new_id)
             self.d.rename(old_id, name)
             if orig_running:  # restore exactly what was there (a revived one stays stopped)
                 self.d.start(old_id)
             self._restart_dependents(deps, dep_running)
             self._log("previous container restored", logging.WARNING, name, "rollback")
+            if not network_parent:
+                self._safe_hook(old_id, "post-rollback")
             raise
         self.d.remove(old_id)
         if not network_parent and was_running:
@@ -1166,6 +1231,13 @@ class Updater:
             self._set(name, step="cleanup", message="Removing the old image")
             self.remove_old_image(old_img, ref)
         return new_id
+
+    def _safe_hook(self, cid, hook):
+        """Run a hook whose failure is only logged (pre-rollback, post-rollback)."""
+        try:
+            self.run_hook(self.d.inspect(cid), hook)
+        except Exception as e:
+            self._log(f"{hook} hook skipped: {e}", logging.DEBUG, event="hook")
 
     def _collect_copy_files(self, ctr):
         """Read files listed in the updock.copy-file label (files that live only in the
@@ -1332,23 +1404,38 @@ class Updater:
 
     def _restart_compose_dependents(self, ctr):
         """Mimic Compose `depends_on: {restart: true}`: restart services that asked to be
-        restarted when this one is recreated."""
+        restarted when this one is recreated; likewise containers labelled
+        updock.depends-on=<this container>:restart (any project)."""
         labels = ctr["Config"].get("Labels") or {}
         project, service = labels.get(COMPOSE_PROJECT), labels.get(COMPOSE_SERVICE)
-        if not (project and service):
-            return
+        me = ctr["Name"].lstrip("/")
         for c in self.d.containers():
             cl = c.get("Labels") or {}
-            if cl.get(COMPOSE_PROJECT) == project and compose_depends(cl).get(service):
-                cname = c["Names"][0].lstrip("/")
-                try:
-                    timeout = self.d.inspect(c["Id"])["Config"].get("StopTimeout") or 10
-                    self.d.restart(c["Id"], timeout)
-                    self._log(f"restarted because {service} was recreated (depends_on restart)",
-                              container=cname, event="compose")
-                except Exception as e:
-                    self._log(f"restart after {service} was recreated failed: {e}",
-                              logging.ERROR, cname, "compose")
+            by_compose = bool(project and service and cl.get(COMPOSE_PROJECT) == project
+                              and compose_depends(cl).get(service))
+            if not (by_compose or label_depends(cl).get(me)):
+                continue
+            cname = c["Names"][0].lstrip("/")
+            what = service if by_compose else me
+            if is_protected(cl):
+                self._log(f"not restarted after {what} was recreated: protected",
+                          logging.WARNING, cname, "protected")
+                continue
+            try:
+                info = self.d.inspect(c["Id"])
+                code = self.run_hook(info, "pre-stop")
+                if code not in (None, 0):
+                    self._log(f"not restarted after {what} was recreated: pre-stop hook "
+                              f"exited {code}", logging.WARNING, cname, "hook")
+                    continue
+                timeout = info["Config"].get("StopTimeout") or 10
+                self.d.restart(c["Id"], timeout)
+                self._log(f"restarted because {what} was recreated "
+                          f"({'depends_on' if by_compose else DEPENDS_LABEL} restart)",
+                          container=cname, event="compose")
+            except Exception as e:
+                self._log(f"restart after {what} was recreated failed: {e}",
+                          logging.ERROR, cname, "compose")
 
     def _restart_dependents(self, deps, dep_running):
         for d in deps:

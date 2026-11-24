@@ -201,6 +201,7 @@
   #cpass[hidden], #dpass[hidden] { display:none; }
   #dmsg { color:var(--err); }
   #dname, #dpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  .prot-badge { background:var(--line); }
   @media (max-width: 640px) {
     header { padding:12px; gap:8px; } header h1 { flex-basis:100%; }
     main { padding:10px; }
@@ -523,6 +524,7 @@ function primaryAction(c) {
   if (busy(c.job)) return `<button disabled>${esc((c.job || "").replace("-", " "))}…</button>`;
   if (c.queued) return `<button disabled>queued</button>`;
   if (!c.eligible) return "";
+  if (c.protected) return `<button onclick="event.stopPropagation();post('/api/containers/${n}/check')">Check</button>`;
   if (c.job === "auth-required") return `<button class="primary" onclick="event.stopPropagation();openLogins('${esc(c.auth_host || "")}')">Add login</button>`;
   if (c.update_available && c.approval) return `<button class="primary" title="${esc(c.approval.message)}" onclick="event.stopPropagation();openApproval(this.closest('tr').dataset.name)">Approve…</button>`;
   if (c.update_available && c.cooldown) return `<button title="${esc(c.cooldown.message)}" onclick="event.stopPropagation();openCooldown(this.closest('tr').dataset.name)">Update…</button>`;
@@ -539,7 +541,9 @@ function detailRow(c) {
   const lat = c.latest ? (c.current && c.latest.id && c.latest.id === c.current.id ? '<span class="img">same as running</span>'
                          : imgCell(c.latest, "newer") + (c.latest.note ? `<div class="img">${esc(c.latest.note)}</div>` : "")) : '<span class="img">not checked yet</span>';
   const flags = [c.pinned && "pinned in the UI: scheduled runs only check it", c.monitor_only && "label updock.monitor-only: scheduled runs only check it",
-                 !c.eligible && `excluded: ${c.excluded}`].filter(Boolean);
+                 !c.eligible && `excluded: ${c.excluded}`,
+                 c.protected && "label updock.protected: only checked; never stopped, updated, rolled back or deleted",
+                 (c.depends_on || []).length && `depends on ${c.depends_on.join(", ")} (updock.depends-on)`].filter(Boolean);
   return `<tr class="detail"><td colspan="4"><div class="dgrid">
     <div><h4>Running</h4><div class="img">${esc(c.image)}</div>${cur}</div>
     <div><h4>Latest available</h4>${lat}</div>
@@ -616,7 +620,8 @@ function rowHtml(c, inGroup) {
   {
     const st = statusText(c), open = OPEN.has(c.name);
     const badges = (c.pinned ? ' <span class="badge pinned-badge">pinned</span>' : "") +
-                   (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "");
+                   (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "") +
+                   (c.protected ? ' <span class="badge prot-badge" title="updock.protected=true: only checked, never stopped or updated">protected</span>' : "");
     return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""} ${inGroup ? "ingrp" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
       <td><div class="nm"><span class="chev">▶</span>${statusIcon(c, st)}${esc(c.name)}${badges}</div>
           <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div>
@@ -649,22 +654,22 @@ addEventListener("scroll", closeMenu, { passive: true });
 function prevLabel(p) { return p.version || (p.ref && tagOf(p.ref) !== "latest" && tagOf(p.ref)) || short(p.id || p.digest || p.image || "") || "previous"; }
 function rowMenu(ev, name) {
   const c = DATA.find(x => x.name === name); if (!c) return;
-  const n = encodeURIComponent(name), dis = busy(c.job) || !c.eligible;
+  const n = encodeURIComponent(name), dis = busy(c.job) || !c.eligible, lock = dis || !!c.protected;
   const notes = (c.update_available && c.latest && c.latest.changelog) || (c.current && c.current.changelog);
   showMenu(ev, [
     { label: "Check now", disabled: dis, run: () => post(`/api/containers/${n}/check`) },
-    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: dis, run: () => c.update_available && c.approval ? openApproval(name) : c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
-    { label: "Recreate (same image)", disabled: dis, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
-    { label: "Versions…", disabled: dis, run: () => openVersions(name) },
+    { label: c.update_available ? "Update now" : "Update (pull & apply if newer)", disabled: lock, run: () => c.update_available && c.approval ? openApproval(name) : c.update_available && c.cooldown ? openCooldown(name) : post(`/api/containers/${n}/update`) },
+    { label: "Recreate (same image)", disabled: lock, run: () => confirm(`Recreate ${name} with its current image?`) && post(`/api/containers/${n}/update?force=true`) },
+    { label: "Versions…", disabled: lock, run: () => openVersions(name) },
     { label: "Version update policy…", disabled: dis, run: () => openVersionPolicy(name) },
-    ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: dis,
+    ...(c.previous ? [{ label: `Roll back to ${prevLabel(c.previous)}`, disabled: lock,
         run: () => confirm(`Roll ${name} back to ${prevLabel(c.previous)}? It will be pinned so scheduled runs don't update it again.`) && post(`/api/containers/${n}/rollback`) }] : []),
     "-",
     { label: c.pinned ? "Unpin (allow scheduled updates)" : "Pin (scheduled runs only check)", disabled: !c.eligible, run: () => post(`/api/containers/${n}/pin?pinned=${!c.pinned}`) },
     { label: "Show logs", run: () => pickContainer(name) },
     ...(safeUrl(notes) ? [{ label: "Release notes ↗", run: () => open(notes, "_blank", "noopener") }] : []),
     ...(c.job === "auth-required" ? [{ label: "Add registry login…", run: () => openLogins(c.auth_host || "") }] : []),
-    ...(ALLOW_DELETE ? ["-", { label: "Delete container…", disabled: dis || c.excluded === "this is Updock", run: () => openDelete(name) }] : []),
+    ...(ALLOW_DELETE ? ["-", { label: "Delete container…", disabled: lock || c.excluded === "this is Updock", run: () => openDelete(name) }] : []),
   ]);
 }
 const THEMES = ["auto", "light", "dark"];
