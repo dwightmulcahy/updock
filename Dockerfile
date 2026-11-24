@@ -6,9 +6,13 @@ ARG GIT_SHA=
 ENV APP_VERSION=${APP_VERSION} GIT_SHA=${GIT_SHA} \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-# No `apt-get upgrade` here: upgraded files land in a new layer on top of the old ones
-# (+28 MB). Security fixes come from bumping the pinned base digest (Dependabot), and
-# the CI image scan fails on any fixable HIGH/CRITICAL issue in the meantime.
+# Security fixes released after the pinned base image, and only those: a full
+# `apt-get upgrade` rewrote ~28 MB of packages into this layer (upgraded files are stored
+# again on top of the originals). Regular updates come from bumping the base digest.
+RUN apt-get update && \
+    pkgs="$(apt list --upgradable 2>/dev/null | grep -- '-security' | cut -d/ -f1 | tr '\n' ' ')" && \
+    if [ -n "$pkgs" ]; then apt-get install -y --only-upgrade --no-install-recommends $pkgs; fi && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin /var/log/apt /var/log/dpkg.log
 COPY requirements.txt .
 # Exact versions with hashes: reproducible builds, tampered packages are rejected
 RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.txt
