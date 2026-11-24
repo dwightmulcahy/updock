@@ -817,3 +817,13 @@ def test_changelog_endpoint(client, monkeypatch, tmp_path):
     f.write_text("{not json")
     assert client.get("/api/changelog").json()["available"] is False
     assert main._version_key("1.2.3-rc1") == (1, 2, 3) and main._version_key("x") is None
+
+
+def test_version_policy_endpoint(client, up):
+    url = "/api/containers/web/version-policy"
+    up.set_version_policy.return_value = {"effective": "patch", "source": "gui", "override": "patch"}
+    assert client.post(url, json={"policy": "patch"}).json()["effective"] == "patch"
+    up.set_version_policy.assert_called_once_with("web", "patch")
+    assert client.post(url, json={"policy": "invalid"}).status_code == 422
+    up.d.inspect.side_effect = KeyError("web")
+    assert client.post(url, json={"policy": "inherit"}).status_code == 404

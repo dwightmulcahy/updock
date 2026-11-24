@@ -138,3 +138,27 @@ def test_same_version_rebuild_allowed(aup):
     u = aup(new="1.2.3", allow="patch")
     u.update("web", scheduled=True)
     assert u.state["web"]["job"] == "updated"
+
+
+def test_gui_policy_persists_and_overrides_label(aup, fake, tmp_path):
+    from app.store import Store
+    u = aup(new="1.3.0", allow="major", labels={"updock.allow": "minor"})
+    u.store = Store(str(tmp_path))
+    assert u.set_version_policy("web", "patch") == {
+        "override": "patch", "effective": "patch", "source": "gui"}
+    u.update("web", scheduled=True)
+    assert u.state["web"]["job"] == "approval"
+    v = Updater(fake, store=u.store, allow="major")
+    assert v.list()[0]["version_policy"]["effective"] == "patch"
+    assert v.set_version_policy("web", "inherit")["effective"] == "minor"
+    with pytest.raises(ValueError):
+        v.set_version_policy("web", "invalid")
+
+
+def test_gui_policy_discovers_newer_major_tag(sfake):
+    sfake.add(semver_ctr(level="patch"))
+    u = Updater(sfake, registry=TagRegistry(), notifier=RecNotifier())
+    u.set_version_policy("web", "patch")
+    u.check_only("web")
+    assert u.state["web"]["job"] == "approval"
+    assert u.state["web"]["target_ref"] == "test/app:2.0.0"
