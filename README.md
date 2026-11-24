@@ -180,6 +180,10 @@ A container on a version tag (`app:1.4.2`) only gets rebuilds of that same tag. 
 
 The tag keeps its shape: a `v` prefix, the number of parts (`1.4` follows `1.x`, not `1.5.1`) and a suffix (`1.4.2-alpine` only moves to `-alpine` tags; pre-releases such as `-rc1` are never picked for a plain release). When no newer tag is in range, the current tag is still checked for a rebuild. Cooldown, health checks and rollback work as usual; the row shows the new tag. Compose users: `docker compose up` recreates from the tag in the compose file, so bump it there too (or use a range-style tag such as `1.4`).
 
+### Approving bigger version steps
+
+Set `UPDOCK_ALLOW=patch|minor|major` (or the label `updock.allow` per container, which wins) to apply only steps up to that size automatically. With `minor` on `1.2.3`, `1.2.9` and `1.4.0` are applied as usual, but `2.0.0` is held: the row shows ⚑ **needs approval** with an **Approve…** button, and an `approval` email is sent once per new image. Approving asks for the admin password (`UPDOCK_PASSWORD`) when one is set and updates right away; if a cooldown is still running, the approval is kept and the update follows when it ends. API: `POST /api/containers/{name}/update` with `{"approve": true, "password": "…"}`. Versions come from the tags when following tags (`updock.semver`), otherwise from the images' version labels (`org.opencontainers.image.version` …); images without a comparable version are not held. Unset (the default) means no approval is needed.
+
 ### Signature checks (cosign)
 
 Opt in per container to require a valid [cosign](https://github.com/sigstore/cosign) signature before a new image replaces the running one. The check runs on the exact digest that was pulled, after the pull and before anything is stopped; a failure leaves the container untouched, shows **unverified**, sends an error email, and scheduled runs skip that digest until you press **Update now**. Version deploys are checked too; manual rollbacks (to an image that already ran) are not.
@@ -229,7 +233,7 @@ Emails are HTML (with a plain-text copy for clients that prefer it): one card pe
 | `UPDOCK_SMTP_USER` / `UPDOCK_SMTP_PASSWORD` | empty | Login, if the server needs one |
 | `UPDOCK_SMTP_FROM` | user or `updock@<host>` | Sender address |
 | `UPDOCK_SMTP_TO` | empty | Recipients, comma-separated |
-| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,disk` | Also: `deploy`, `delete` |
+| `UPDOCK_NOTIFY_EVENTS` | `update,rollback,error,available,approval,disk` | Also: `deploy`, `delete` |
 | `UPDOCK_INSTANCE` | host name | Name shown in subjects (handy with several hosts) |
 | `UPDOCK_URL` | empty | Link to the UI included in emails |
 
@@ -313,6 +317,7 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_DISK_MAX` | empty | Image storage limit (`40GB`, `20GiB`); at/over it scheduled runs only check |
 | `UPDOCK_DISK_WARN` | empty | Warning level: a size or a percentage of the max (`80%`) |
 | `UPDOCK_HOOKS` | `false` | Run `updock.hook.*` lifecycle hooks from container labels |
+| `UPDOCK_ALLOW` | *(unset)* | Largest version step applied without approval: `patch`, `minor` or `major` (label `updock.allow` overrides) |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
 | `UPDOCK_DIGEST_CHECK` | `true` | Check the registry digest before pulling; `false` = always pull to check |
 | `UPDOCK_HEALTH_TIMEOUT` | `120` | Seconds to wait for a healthcheck to report `healthy` |

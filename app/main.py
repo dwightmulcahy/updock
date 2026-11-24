@@ -160,7 +160,8 @@ up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              exclude_images=env_list("UPDOCK_EXCLUDE_IMAGES"),
              scope=os.getenv("UPDOCK_SCOPE", "").strip() or None,
              revive_stopped=env_bool("UPDOCK_REVIVE_STOPPED", False),
-             cosign_data_dir=STORE.dir if STORE else None)
+             cosign_data_dir=STORE.dir if STORE else None,
+             allow=os.getenv("UPDOCK_ALLOW"))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -500,7 +501,7 @@ def check(request):
     return bg(up.check_only, name)
 
 
-UPDATE_BODY = {"override_cooldown": (bool, False), "password": (str, "")}
+UPDATE_BODY = {"override_cooldown": (bool, False), "approve": (bool, False), "password": (str, "")}
 DELETE_BODY = {"remove_image": (bool, False), "remove_volumes": (bool, False), "password": (str, "")}
 LOGIN_BODY = {"host": (str, ...), "username": (str, ...), "password": (str, ...)}
 
@@ -547,11 +548,17 @@ def update(request):
     name, force = request.path_params["name"], q_bool(request, "force", False)
     data = body(request, UPDATE_BODY)
     override = bool(data and data["override_cooldown"])
+    approve = bool(data and data["approve"])
+    if override or approve:
+        require_admin(request, data["password"], name,
+                      "version approval" if approve else "cooldown override")
+    who = getattr(request.state, "user", None) or "admin"
+    if approve:
+        logging.getLogger("updock").warning("%s: version update approved by %s", name, who,
+                                            extra={"container": name, "event": "approval"})
+        return bg(up.update, name, force, False, override, True)
     if override:
-        require_admin(request, data["password"], name, "cooldown override")
-    if override:
-        logging.getLogger("updock").warning("%s: cooldown skipped by %s", name,
-                                            getattr(request.state, "user", None) or "admin",
+        logging.getLogger("updock").warning("%s: cooldown skipped by %s", name, who,
                                             extra={"container": name, "event": "cooldown"})
         return bg(up.update, name, force, False, True)
     return bg(up.update, name, force)
@@ -740,7 +747,7 @@ def about(request):
             "label_enable": up.label_enable, "include_stopped": up.include_stopped,
             "revive_stopped": up.revive_stopped, "health_timeout": up.health_timeout,
             "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
-            "scope": up.scope},
+            "scope": up.scope, "allow": up.allow},
         "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
         "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
     }

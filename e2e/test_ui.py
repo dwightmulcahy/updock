@@ -213,6 +213,31 @@ def test_cooldown_needs_confirmation_and_password(page, up, monkeypatch):
     assert up.d.ctrs["web"]["Image"] == "sha256:new"
 
 
+def test_major_update_needs_approval(page, up, monkeypatch):
+    from app import main
+    monkeypatch.setattr(up.registry, "remote_info", lambda ref, platform=None: {
+        "id": "new", "digest": "sha256:newer", "tags": [], "version": "9.0.0",
+        "revision": None, "created": None})
+    monkeypatch.setattr(up, "allow", "minor")
+    monkeypatch.setattr(up, "approval_info", lambda name, ctr: None if up.state[name].get("approved") else {
+        "from": "1.0.0", "to": "9.0.0", "level": "major", "allow": "minor", "key": "sha256:newer",
+        "message": "1.0.0 -> 9.0.0 is a major update; only minor updates are applied without approval"})
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    up.check_only("web")
+    page.context.set_extra_http_headers({"Authorization": "Basic YWRtaW46czNjcmV0"})
+    page.reload()
+    r = row(page, "web")
+    expect(r.locator(".sicon.flag")).to_have_attribute("title", re.compile("needs approval"))
+    r.get_by_role("button", name="Approve…").click()
+    dlg = page.locator("#cdlg")
+    expect(dlg).to_contain_text("major update")
+    expect(page.locator("#cgo")).to_have_text("Approve & update")
+    page.fill("#cpass", "s3cret")
+    page.click("#cgo")
+    expect(dlg).to_be_hidden()
+    expect(r).to_contain_text("updated", timeout=10000)
+
+
 def test_delete_container_needs_name_and_password(page, up, monkeypatch):
     from app import main
     monkeypatch.setattr(main, "UI_PASS", "s3cret")

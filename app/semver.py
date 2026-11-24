@@ -33,3 +33,20 @@ def best(current, tags, level):
         if found is None or p[1] > found[1]:
             found = (tag, p[1])
     return found[0] if found else None
+
+
+def jump(old, new):
+    """How far old -> new moves: 'patch', 'minor' or 'major' (the first part that grows);
+    None when either isn't version-like or new isn't newer. Prefix and suffix are ignored."""
+    a, b = parse(str(old or "").strip()), parse(str(new or "").strip())
+    if not a or not b:
+        return None
+    x, y = (a[1] + (0, 0))[:3], (b[1] + (0, 0))[:3]
+    if y <= x:
+        return None
+    return LEVELS[2 - next(i for i in range(3) if x[i] != y[i])]
+
+
+def exceeds(level, allow):
+    """True when a `level` move is beyond what `allow` permits."""
+    return LEVELS.index(level) > LEVELS.index(allow)

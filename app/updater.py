@@ -17,12 +17,13 @@ from .logs import LogBuffer
 from .notify import EmailNotifier
 from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
                        RegistryError, parse_repo)
-from .semver import LEVELS, SEMVER_LABEL, best as semver_best
+from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump
 from .schedule import format_duration, parse_duration, parse_timestamp
 from .units import format_size
 
 ENABLE_LABEL = "updock.enable"
 COOLDOWN_LABEL = "updock.cooldown"
+ALLOW_LABEL = "updock.allow"
 SCOPE_LABEL = "updock.scope"
 MONITOR_ONLY_LABEL = "updock.monitor-only"
 REVIVE_LABEL = "updock.revive"
@@ -196,7 +197,7 @@ class Updater:
                  digest_check=True, notifier=None, store=None, include_stopped=False,
                  cooldown=0, hooks=False, disk_max=0, disk_warn=0, exclude_names=(),
                  include_images=(), exclude_images=(), scope=None, revive_stopped=False,
-                 probe=None, cosign_data_dir=None):
+                 probe=None, cosign_data_dir=None, allow=None):
         self.d = docker
         self.registry = registry
         self.cleanup = cleanup
@@ -235,6 +236,7 @@ class Updater:
         self.counters = Counter()  # Prometheus counters: outcomes and runs since start
         self.last_run = {}
         self._bad_labels = set()
+        self.allow = self._level(allow, "UPDOCK_ALLOW")
         if store:
             for name, st in store.load_state().items():
                 self.state[name].update(st)
@@ -328,7 +330,10 @@ class Updater:
                    "service": (c.get("Labels") or {}).get(COMPOSE_SERVICE),
                    **st}
             if row.get("update_available") and isinstance(row.get("latest"), dict):
-                row["cooldown"] = self.cooldown_info(name, {"Config": {"Labels": c.get("Labels")}})
+                stub = {"Config": {"Labels": c.get("Labels"), "Image": ref}, "Image": c["ImageID"],
+                        "Name": name}
+                row["cooldown"] = self.cooldown_info(name, stub)
+                row["approval"] = self.approval_info(name, stub)
             template = (c.get("Labels") or {}).get(TEMPLATE_LABEL)
             for key in ("current", "latest"):
                 if isinstance(row.get(key), dict):
@@ -388,6 +393,61 @@ class Updater:
             self._log(f"invalid {SEMVER_LABEL}={raw!r} (use patch, minor or major); "
                       "ignoring it", logging.WARNING, name, "check")
         return None
+
+    def _level(self, raw, what, name=None):
+        """patch|minor|major, or None (with a one-time warning) for anything else."""
+        level = str(raw or "").strip().lower()
+        if not level or level in LEVELS:
+            return level or None
+        key = name or what
+        if key not in self._bad_labels:
+            self._bad_labels.add(key)
+            self._log(f"invalid {what}={raw!r} (use patch, minor or major); ignoring it",
+                      logging.WARNING, name, "approval")
+        return None
+
+    def allow_for(self, name, ctr):
+        """Largest version step applied without approval (label updock.allow, else
+        UPDOCK_ALLOW); None: any step."""
+        raw = (ctr["Config"].get("Labels") or {}).get(ALLOW_LABEL)
+        if raw is None:
+            return self.allow
+        return self._level(raw, ALLOW_LABEL, name)
+
+    def approval_info(self, name, ctr):
+        """{"from", "to", "level", "allow", "key", "message"} when the known newer image
+        moves further than allowed and hasn't been approved, else None."""
+        allow = self.allow_for(name, ctr)
+        latest = self.state[name].get("latest") or {}
+        if not allow or not latest:
+            return None
+        if self.state[name].get("target_ref"):  # following version tags: compare the tags
+            old, new = split_ref(ctr["Config"]["Image"])[1], latest.get("tag")
+        else:
+            old, new = (self._image_info(ctr["Image"]) or {}).get("version"), latest.get("version")
+        level = jump(old, new)
+        if not level or not exceeds(level, allow):
+            return None
+        key = latest.get("digest") or latest.get("id") or new
+        if key == self.state[name].get("approved"):
+            return None
+        return {"from": old, "to": new, "level": level, "allow": allow, "key": key,
+                "message": f"{old} -> {new} is a {level} update; only {allow} updates are "
+                           "applied without approval"}
+
+    def _needs_approval(self, name, ctr):
+        """Hold an update that needs approval: show it and notify once per new image."""
+        info = self.approval_info(name, ctr)
+        if not info:
+            return False
+        self._set(name, job="approval", message=info["message"])
+        if self.state[name].get("notified_approval") != info["key"]:
+            self._log(f"{info['message']}; waiting for approval", logging.WARNING, name,
+                      "approval")
+            self.notifier.notify("approval", name, info["message"],
+                                 {**self._change_details(ctr), "reason": info["message"]})
+            self._set(name, notified_approval=info["key"])
+        return True
 
     def _check_semver(self, name, ctr, ref, level):
         """Look for a newer version tag within `level`. Returns True (and records it as
@@ -601,9 +661,11 @@ class Updater:
                 except Exception:
                     pass
 
-    def update(self, name, force=False, scheduled=False, override_cooldown=False):
+    def update(self, name, force=False, scheduled=False, override_cooldown=False,
+               approve=False):
         """Update one container. The cooldown applies to manual updates too unless
-        `override_cooldown` (the UI asks for confirmation, plus the admin password if set)."""
+        `override_cooldown` (the UI asks for confirmation, plus the admin password if set).
+        A step beyond updock.allow / UPDOCK_ALLOW waits until `approve` (same gate)."""
         def job():
             self.state[name]["action"] = "update"
             try:
@@ -614,6 +676,15 @@ class Updater:
                 self._log(f"pull failed ({e}); recreating from local image",
                           logging.WARNING, name, "pull")
                 ctr, avail = self.d.inspect(name), False
+            if avail and approve:
+                info = self.approval_info(name, ctr)
+                if info:
+                    self._set(name, approved=info["key"])
+                    self._log(f"approved: {info['from']} -> {info['to']}", container=name,
+                              event="approval")
+            elif avail and self._needs_approval(name, ctr):
+                self.counters["result_approval"] += 1
+                return
             if avail and not override_cooldown:
                 blocked = self._cooldown_block(name, ctr)
                 if blocked:  # before pulling: a too-new image is never even downloaded
@@ -781,6 +852,8 @@ class Updater:
             self._log("update available" if avail else "up to date", container=name, event="check")
             latest = (self.state[name].get("latest") or {})
             key = latest.get("id") or latest.get("digest")
+            if avail and self._needs_approval(name, ctr):
+                return
             if scheduled and avail and key != self.state[name].get("notified_available"):
                 self.notifier.notify("available", name, self._describe_change(ctr),
                                      self._change_details(ctr))

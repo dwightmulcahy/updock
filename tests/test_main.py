@@ -625,7 +625,7 @@ def test_about(client, up, monkeypatch):
                                  "Arch": "amd64"}
     for k, v in dict(cleanup=True, digest_check=True, label_enable=False, include_stopped=False,
                      revive_stopped=False, health_timeout=120, startup_grace=10, cooldown=0,
-                     hooks=False, scope=None).items():
+                     hooks=False, scope=None, allow="minor").items():
         setattr(up, k, v)
     monkeypatch.setenv("DOCKER_HOST", "tcp://user:pw@socket-proxy:2375")
     monkeypatch.setattr(main, "UI_PASS", "x")
@@ -633,6 +633,7 @@ def test_about(client, up, monkeypatch):
     assert a["engine"] == {"version": "29.0.1", "api": "1.52", "os": "linux", "arch": "amd64"}
     assert a["docker_host"] == "tcp://socket-proxy:2375"  # credentials never shown
     assert a["auth"] == "password" and a["settings"]["health_timeout"] == 120
+    assert a["settings"]["allow"] == "minor"
     up.d.version.side_effect = RuntimeError("proxy says no")
     monkeypatch.setenv("DOCKER_HOST", "unix")
     a = client.get("/api/about", headers=_auth("admin", "x")).json()
@@ -688,6 +689,19 @@ def test_cooldown_override_with_token_or_without_password(client, up, monkeypatc
     assert client.post("/api/containers/web/update", json={"override_cooldown": True}).status_code == 202
     assert client.post("/api/containers/web/update", json={}).status_code == 202
     up.update.assert_called_with("web", False)
+
+
+def test_version_approval_needs_admin_password(client, up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    h = _auth("admin", "s3cret")
+    r = client.post("/api/containers/web/update", headers=h, json={"approve": True, "password": "x"})
+    assert r.status_code == 403 and "version approval refused" in caplog.text
+    up.update.assert_not_called()
+    r = client.post("/api/containers/web/update", headers=h,
+                    json={"approve": True, "override_cooldown": True, "password": "s3cret"})
+    assert r.status_code == 202
+    up.update.assert_called_with("web", False, False, True, True)
+    assert "version update approved by admin" in caplog.text
 
 
 # ---------- delete ----------
