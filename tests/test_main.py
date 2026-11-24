@@ -832,6 +832,21 @@ def test_version_policy_endpoint(client, up):
 
 # ---------- more endpoint tests ----------
 
+def test_selected_runs(client, up):
+    r = client.post("/api/selected/update", json={"names": ["web", " db ", "web"]})
+    assert r.status_code == 202
+    up.run_all.assert_called_with(True, None, ["db", "web"])
+    client.post("/api/selected/check", json={"names": ["web"]})
+    up.run_all.assert_called_with(False, None, ["web"])
+    assert client.post("/api/selected/nuke", json={"names": ["web"]}).status_code == 404
+    for bad in ({"names": []}, {"names": [""]}, {"names": [1]}, {"names": "web"}, {}):
+        assert client.post("/api/selected/check", json=bad).status_code == 422
+    assert client.post("/api/selected/check",
+                       json={"names": [f"c{i}" for i in range(501)]}).status_code == 422
+    up.run = {"kind": "check"}
+    assert client.post("/api/selected/check", json={"names": ["web"]}).status_code == 409
+
+
 def test_self_update_in_progress_blocks_runs(client, up, monkeypatch):
     monkeypatch.setattr(main.SELF, "in_progress", True)
     r = client.post("/api/update-all")

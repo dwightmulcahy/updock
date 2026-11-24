@@ -532,7 +532,9 @@ def check(request):
 
 
 UPDATE_BODY = {"override_cooldown": (bool, False), "approve": (bool, False), "password": (str, "")}
+SELECT_BODY = {"names": (list, ...)}
 PASSWORD_BODY = {"password": (str, "")}
+MAX_SELECTED = 500
 
 
 def refuse_protected(name):
@@ -835,6 +837,27 @@ def no_run_in_progress():
 def check_all(request):
     no_run_in_progress()
     return bg(up.run_all, False)
+
+
+def selected_names(request):
+    names = body(request, SELECT_BODY, optional=False)["names"]
+    if not names or not all(isinstance(n, str) and n.strip() for n in names):
+        raise HTTPException(422, "'names' must be a non-empty list of container names")
+    if len(names) > MAX_SELECTED:
+        raise HTTPException(422, f"at most {MAX_SELECTED} containers per request")
+    return sorted({n.strip() for n in names})
+
+
+@route("/api/selected/{action}", "POST")
+def selected_run(request):
+    """Check or update the containers selected in the UI, with the rules of Update all
+    (dependencies first, cooldown, pinned/monitor-only/protected only checked)."""
+    action = request.path_params["action"]
+    if action not in ("check", "update"):
+        raise HTTPException(404, "unknown action")
+    names = selected_names(request)
+    no_run_in_progress()
+    return bg(up.run_all, action == "update", None, names)
 
 
 @route("/api/health", "GET")

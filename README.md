@@ -82,6 +82,7 @@ UPDOCK_SMTP_PASSWORD_FILE=/run/secrets/updock_smtp_password
 - Click a row for full details: running and latest image (ID, digest, revision, build date, release notes), last check/update, why it's excluded or pinned, and the full message.
 - **Check all** / **Update all** show a progress banner (`Checking containers 3 of 12 · bazarr · 0:14`) with the remaining containers marked **queued**, then a summary (`Check finished in 14s · 12 containers: 2 update available, 10 up to date`) with a shortcut to the problems or updates. Only one run at a time.
 - An update shows its steps live — Pull (with download %), Stop, Start, Health check (with time left), Clean up — and how long it has been running.
+- Tick the boxes in front of rows (or the header box for every row shown) to **Check selected** / **Update selected**: the same rules as **Update all** (dependencies first, cooldown, pinned / monitor-only / protected containers only checked), shown in the same progress banner. API: `POST /api/selected/check` or `/update` with `{"names": ["web", "db"]}`.
 - Search by name or image, filter (**Updates**, **Problems**, **Running**, **Stopped**, **Excluded**, with counts) and sort (needs attention first, name, last checked, recently updated); the choice is remembered. Narrow screens drop the "checked" column.
 
 
@@ -288,6 +289,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Registry details for one tag | `GET /api/containers/{name}/tags/{tag}` |
 | Pin / unpin | `POST /api/containers/{name}/pin?pinned=true\|false` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
+| Check / update selected | `POST /api/selected/check`, `POST /api/selected/update` with `{"names": [...]}` |
 | Health monitor | `GET /api/health`, `GET /api/health/history`, `POST /api/health/check` |
 | Self-update | `GET /api/self`, `POST /api/self/check`, `POST /api/self/update` |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
