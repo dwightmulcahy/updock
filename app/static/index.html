@@ -203,6 +203,7 @@
   #dname, #dpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
   .prot-badge { background:var(--line); }
   .badge.unhealthy { background:var(--warn); color:#fff; }
+  .version-badge.has-update::after { content:" ↑"; color:var(--accent); }
   .hlist { display:grid; gap:2px; font-size:13px; }
   .hlist .he { display:grid; grid-template-columns:150px 160px 110px 1fr; gap:10px; padding:4px 0; border-bottom:1px solid var(--line); }
   .hlist .he.unhealthy .st { color:var(--err); } .hlist .he.healthy .st { color:var(--ok); }
@@ -310,6 +311,10 @@
     <p>Updock keeps your Docker containers on their newest images, like Watchtower, with a web UI: it checks registries on a schedule, updates containers in place (recreating them with the same settings), verifies they come back healthy and rolls back if they don't. You can check, update, pin, roll back or deploy another version of any container right away from the Containers tab.</p>
   </div>
   <div class="doc-section"><h2>This instance</h2><dl class="kv" id="about-build"><dt>Loading…</dt><dd></dd></dl></div>
+  <div class="doc-section" id="self-sec" hidden><h2>Updating Updock</h2>
+    <div class="meta" id="self-info">Loading…</div>
+    <div class="row" style="margin-top:8px"><button onclick="selfCheck()" id="self-check">Check for a new Updock</button>
+      <button class="primary" id="self-go" hidden onclick="openSelfUpdate()">Self-update…</button></div></div>
   <div class="doc-section"><h2>Settings in effect</h2><dl class="kv" id="about-settings"></dl>
     <p class="meta" style="margin-top:10px">Set with <code>UPDOCK_*</code> environment variables; see the README for all of them.</p></div>
   <div class="doc-section">
@@ -374,6 +379,16 @@
     <div id="pmsg" role="status" class="meta"></div>
     <div class="row"><button type="button" onclick="document.getElementById('pdlg').close()">Cancel</button>
       <button id="pgo" class="primary" type="submit">Save policy</button></div>
+  </form>
+</dialog>
+<dialog id="sdlg" aria-labelledby="stitle">
+  <b id="stitle">Update Updock itself?</b>
+  <p id="stext" class="meta" style="max-width:440px;line-height:1.5">A helper container replaces Updock with the new image, waits for its healthcheck and rolls back if it fails. The page reconnects when it's done.</p>
+  <form id="sform" onsubmit="selfUpdate(event)" style="display:grid;gap:8px">
+    <input id="spass" type="password" placeholder="Updock password (the one you sign in with)" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore hidden>
+    <div class="meta" id="smsg" role="status"></div>
+    <div class="row"><button type="button" onclick="sdlg.close()">Cancel</button>
+      <button class="primary" type="submit" id="sgo">Update Updock</button></div>
   </form>
 </dialog>
 <dialog id="ldlg">
@@ -972,6 +987,45 @@ async function loadHealth() {
 }
 async function healthNow() { await post("/api/health/check"); setTimeout(loadHealth, 800); }
 
+// ---- self-update (About tab) ----
+async function loadSelf() {
+  const s = await fetch("/api/self").then(r => r.json()).catch(() => null);
+  $("self-sec").hidden = !s || !s.allowed;
+  if (!s || !s.allowed) return s;
+  const res = s.result, when = res && (res.finished || res.started);
+  const last = res ? `Last self-update: ${res.status}${res.error ? ` (${res.error})` : ""}${when ? `, ${ago(when)}` : ""}.` : "";
+  $("self-info").textContent = !s.found ? s.reason
+    : s.in_progress ? "A self-update is in progress…"
+    : `${s.image} — ${s.update_available ? `newer image available${s.latest && s.latest.version ? ` (${s.latest.version})` : ""}` : s.last_check ? "up to date" : "not checked yet"}. ${last}${s.error ? ` Not started: ${s.error}` : ""}`;
+  $("self-go").hidden = !(s.found && s.update_available && !s.in_progress);
+  $("ver").classList.toggle("has-update", !!s.update_available);
+  $("ver").title = s.update_available ? "A newer Updock is available (About tab)" : "Build info";
+  return s;
+}
+async function selfCheck() {
+  $("self-check").disabled = true;
+  const r = await fetch("/api/self/check", { method: "POST", headers: { "X-Updock-Request": "1" } });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.detail || `Check failed (${r.status})`); }
+  $("self-check").disabled = false;
+  loadSelf();
+}
+function openSelfUpdate() {
+  $("spass").hidden = GATE !== "password"; $("spass").required = GATE === "password"; $("spass").value = "";
+  $("smsg").textContent = ""; $("sgo").disabled = false;
+  sdlg.showModal();
+}
+async function selfUpdate(ev) {
+  ev.preventDefault();
+  $("sgo").disabled = true; $("smsg").textContent = "Starting…";
+  const r = await fetch("/api/self/update", { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Updock-Request": "1" }, body: JSON.stringify({ password: $("spass").value }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $("sgo").disabled = false; $("smsg").textContent = d.detail || `Failed (${r.status})`; return; }
+  $("smsg").textContent = "Pulling the new image and handing over to the helper; this page reconnects by itself.";
+  setTimeout(() => { sdlg.close(); loadSelf(); }, 3000);
+}
+fetch("/api/containers").then(r => r.json()).then(d => { if (d.self_update) loadSelf(); }).catch(() => {});
+
 // ---- tabs (Containers / Logs / Health / About), kept in the URL hash ----
 const TABS = ["containers", "logs", "health", "about"];
 function showTab() {
@@ -979,7 +1033,7 @@ function showTab() {
   for (const n of TABS) $(`tab-${n}`).hidden = n !== t;
   document.querySelectorAll(".page-nav a").forEach(a =>
     a.dataset.tab === t ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
-  if (t === "about") loadAbout();
+  if (t === "about") { loadAbout(); loadSelf(); }
   if (t === "health") loadHealth();
   if (t === "logs") $("logs").scrollTop = 0;
 }
@@ -1015,6 +1069,7 @@ async function loadAbout() {
     st.cooldown && ["Cooldown", `${st.cooldown}s`], st.allow && ["Allowed without approval", `${st.allow} updates`], ["Lifecycle hooks", yn(st.hooks)],
     st.scope && ["Scope", st.scope],
     ["Health monitor", st.health_monitor ? `every ${st.health_monitor}s` : "off"],
+    ["Self-update", yn(st.self_update)],
     (st.insecure_registries || []).length && ["Plain-HTTP registries", st.insecure_registries.join(", ")],
     ["Email", n.enabled ? `to ${(n.to || []).join(", ")} via ${n.server}` : "off"],
   ]);

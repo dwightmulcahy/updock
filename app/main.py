@@ -38,6 +38,7 @@ from . import events as eventsmod
 from .notify import EmailNotifier
 from .registry import Registry
 from .schedule import Cron, Window, parse_duration
+from .selfupdate import SelfUpdateError, SelfUpdater
 from .store import Store
 from .units import parse_size, parse_threshold
 from .updater import Updater, protected_message
@@ -172,6 +173,8 @@ HEALTH = HealthMonitor(
     restart_after=int(os.getenv("UPDOCK_HEALTH_RESTART_AFTER", "0")),
     restart_attempts=int(os.getenv("UPDOCK_HEALTH_RESTART_ATTEMPTS", "3")),
     history_seconds=parse_duration(os.getenv("UPDOCK_HEALTH_HISTORY", "7d")))
+SELF = SelfUpdater(up.d, up, NOTIFIER, data_dir=STORE.dir if STORE else None, version=VERSION,
+                   allowed=env_bool("UPDOCK_ALLOW_SELF_UPDATE", False))
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -246,6 +249,8 @@ async def lifespan(_):
             HEALTH.notify_after, f", restart after {HEALTH.restart_after}"
             if HEALTH.restart_after else "", extra={"event": "health"})
         threading.Thread(target=HEALTH.loop, daemon=True).start()
+    if SELF.pending():
+        SELF.report_in_background(up.health_timeout + 120)
     STARTED["done"] = True
     yield
 
@@ -487,7 +492,7 @@ def with_health(rows):
 @route("/api/containers", "GET")
 def containers(request):
     return {"containers": with_health(up.list()), "next_run": next_run["t"],
-            "auto_update": AUTO_UPDATE,
+            "auto_update": AUTO_UPDATE, "self_update": SELF.allowed,
             "schedule": schedule_info(), "run": up.run_status(), "last_run": up.last_run,
             "version": VERSION, "user": getattr(request.state, "user", None),
             "cooldown_gate": cooldown_gate(), "allow_delete": ALLOW_DELETE}
@@ -527,6 +532,7 @@ def check(request):
 
 
 UPDATE_BODY = {"override_cooldown": (bool, False), "approve": (bool, False), "password": (str, "")}
+PASSWORD_BODY = {"password": (str, "")}
 
 
 def refuse_protected(name):
@@ -799,7 +805,7 @@ def about(request):
             "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
             "scope": up.scope, "allow": up.allow,
             "insecure_registries": sorted(getattr(up.registry, "insecure", ()) or ()),
-            "health_monitor": HEALTH.interval or None},
+            "health_monitor": HEALTH.interval or None, "self_update": SELF.allowed},
         "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
         "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
     }
@@ -819,10 +825,15 @@ def notify_test(request):
     return {"sent": True, "to": NOTIFIER.to}
 
 
+def no_run_in_progress():
+    if up.run or SELF.in_progress:
+        raise HTTPException(409, "a run is already in progress" if up.run else
+                            "a self-update is in progress")
+
+
 @route("/api/check-all", "POST")
 def check_all(request):
-    if up.run:
-        raise HTTPException(409, "a run is already in progress")
+    no_run_in_progress()
     return bg(up.run_all, False)
 
 
@@ -842,6 +853,34 @@ def health_check(request):
     return bg(HEALTH.tick)
 
 
+@route("/api/self", "GET")
+def self_status(request):
+    return SELF.status()
+
+
+@route("/api/self/check", "POST")
+def self_check(request):
+    try:
+        available = SELF.check()
+    except Exception as e:
+        raise HTTPException(502, f"could not check Updock's image: {e}")
+    return {**SELF.status(), "update_available": available}
+
+
+@route("/api/self/update", "POST")
+def self_update(request):
+    data = body(request, PASSWORD_BODY) or {"password": ""}
+    require_admin(request, data["password"], "updock", "self-update")
+    try:
+        SELF.preflight()
+    except SelfUpdateError as e:
+        raise HTTPException(409, str(e))
+    logging.getLogger("updock").warning("self-update requested by %s",
+                                        getattr(request.state, "user", None) or "admin",
+                                        extra={"event": "self-update"})
+    return bg(SELF.start_safely)
+
+
 @route("/api/projects/{project}/{action}", "POST")
 def project_run(request):
     """Check or update every container of one Compose project (dependencies first)."""
@@ -850,15 +889,13 @@ def project_run(request):
         raise HTTPException(404, "unknown action")
     if project not in up.projects():
         raise HTTPException(404, f"no Compose project {project!r}")
-    if up.run:
-        raise HTTPException(409, "a run is already in progress")
+    no_run_in_progress()
     return bg(up.run_all, action == "update", project)
 
 
 @route("/api/update-all", "POST")
 def update_all(request):
-    if up.run:
-        raise HTTPException(409, "a run is already in progress")
+    no_run_in_progress()
     return bg(up.run_all, True)
 
 

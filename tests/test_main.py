@@ -51,7 +51,7 @@ def test_containers(client):
     assert client.get("/api/containers").json() == {
         "containers": [{"name": "web"}], "next_run": None, "auto_update": True,
         "version": main.VERSION, "schedule": main.schedule_info(), "run": None, "last_run": {},
-        "user": None, "cooldown_gate": "confirm", "allow_delete": True}
+        "user": None, "cooldown_gate": "confirm", "allow_delete": True, "self_update": False}
 
 
 def test_health_bypasses_auth(client, monkeypatch):
@@ -832,6 +832,12 @@ def test_version_policy_endpoint(client, up):
 
 # ---------- more endpoint tests ----------
 
+def test_self_update_in_progress_blocks_runs(client, up, monkeypatch):
+    monkeypatch.setattr(main.SELF, "in_progress", True)
+    r = client.post("/api/update-all")
+    assert r.status_code == 409 and "self-update" in r.json()["detail"]
+
+
 def test_protected_refused_by_endpoints(client, up):
     up.protected.return_value = True
     for path, kw in (("/api/containers/web/update", {}), ("/api/containers/web/deploy?tag=1", {}),
@@ -876,9 +882,43 @@ def test_health_metrics(client, up, health):
     assert "updock_health_restarts_total 2" in text
 
 
-def test_lifespan_starts_health_monitor(up, health, monkeypatch):
+def test_lifespan_starts_health_monitor_and_report(up, health, monkeypatch):
+    reports = []
+    monkeypatch.setattr(main.SELF, "pending", lambda: True)
+    monkeypatch.setattr(main.SELF, "report_in_background", lambda wait: reports.append(wait))
+    up.health_timeout = 120
     with TestClient(main.app):
         pass
-    assert SyncThread.started == [health.loop]
+    assert SyncThread.started == [health.loop] and reports == [240]
+
+
+@pytest.fixture
+def selfu(monkeypatch):
+    m = MagicMock()
+    m.status.return_value = {"allowed": True, "update_available": False}
+    m.check.return_value = True
+    monkeypatch.setattr(main, "SELF", m)
+    m.in_progress = False
+    return m
+
+
+def test_self_endpoints(client, up, selfu, monkeypatch):
+    assert client.get("/api/self").json()["allowed"] is True
+    assert client.post("/api/self/check").json()["update_available"] is True
+    selfu.check.side_effect = RuntimeError("registry down")
+    r = client.post("/api/self/check")
+    assert r.status_code == 502 and "registry down" in r.json()["detail"]
+    assert client.post("/api/self/update").status_code == 202
+    selfu.start_safely.assert_called_once()
+    selfu.preflight.side_effect = main.SelfUpdateError("self-update is disabled")
+    r = client.post("/api/self/update", json={})
+    assert r.status_code == 409 and "disabled" in r.json()["detail"]
+
+
+def test_self_update_needs_admin_password(client, up, selfu, monkeypatch):
+    monkeypatch.setattr(main, "UI_PASS", "pw")
+    h = _auth("admin", "pw")
+    assert client.post("/api/self/update", json={"password": "bad"}, headers=h).status_code == 403
+    assert client.post("/api/self/update", json={"password": "pw"}, headers=h).status_code == 202
 
 

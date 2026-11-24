@@ -9,12 +9,14 @@ from html import escape
 TITLES = {"update": "updated", "rollback": "rolled back", "error": "failed",
           "available": "update available", "approval": "needs approval", "deploy": "deployed", "delete": "deleted",
           "disk": "disk space", "test": "test email", "unhealthy": "unhealthy",
-          "healthy": "healthy again"}
+          "healthy": "healthy again", "self-update": "Updock self-update"}
 COLORS = {"update": "#16a34a", "available": "#d97706", "approval": "#ea580c", "error": "#dc2626",
           "rollback": "#dc2626", "deploy": "#7c3aed", "delete": "#6b7280", "disk": "#2563eb",
-          "test": "#2563eb", "unhealthy": "#dc2626", "healthy": "#16a34a"}
+          "test": "#2563eb", "unhealthy": "#dc2626", "healthy": "#16a34a",
+          "self-update": "#7c3aed"}
 ICONS = {"update": "✓", "available": "↑", "approval": "⚑", "error": "!", "rollback": "↺", "deploy": "⇄",
-         "delete": "✕", "disk": "◔", "test": "✉", "unhealthy": "♥", "healthy": "♥"}
+         "delete": "✕", "disk": "◔", "test": "✉", "unhealthy": "♥", "healthy": "♥",
+         "self-update": "⟳"}
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 

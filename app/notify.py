@@ -14,9 +14,9 @@ from .email_render import html_body, text_body, title
 log = logging.getLogger("updock")
 
 ALL_EVENTS = ("update", "rollback", "error", "available", "approval", "deploy", "disk", "delete",
-              "unhealthy", "healthy")
+              "unhealthy", "healthy", "self-update")
 DEFAULT_EVENTS = ("update", "rollback", "error", "available", "approval", "disk", "unhealthy",
-                  "healthy")
+                  "healthy", "self-update")
 
 
 class EmailNotifier:
