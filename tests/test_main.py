@@ -843,3 +843,42 @@ def test_protected_refused_by_endpoints(client, up):
     up.delete.assert_not_called()
 
 
+@pytest.fixture
+def health(monkeypatch):
+    m = MagicMock()
+    m.enabled, m.interval, m.notify_after, m.restart_after = True, 60, 3, 0
+    m.state = {"web": {"status": "unhealthy", "failures": 4}}
+    m.restarts_total = 2
+    m.status.return_value = {"enabled": True}
+    m.query.return_value = [{"container": "web", "status": "unhealthy"}]
+    monkeypatch.setattr(main, "HEALTH", m)
+    return m
+
+
+def test_health_endpoints(client, up, health):
+    up.list.return_value = [{"name": "web"}, {"name": "db"}]
+    rows = client.get("/api/containers").json()["containers"]
+    assert rows[0]["health"]["status"] == "unhealthy" and rows[1]["health"] is None
+    assert client.get("/api/health").json() == {"enabled": True}
+    r = client.get("/api/health/history?container=web&limit=99999").json()
+    assert r["entries"][0]["status"] == "unhealthy"
+    health.query.assert_called_with("web", 5000)
+    assert client.post("/api/health/check").status_code == 202
+    health.tick.assert_called_once()
+
+
+def test_health_metrics(client, up, health):
+    up.list.return_value = []
+    up.counters = __import__("collections").Counter()
+    up.last_run, up._disk = {}, None
+    text = client.get("/metrics").text
+    assert 'updock_container_unhealthy{container="web"} 1' in text
+    assert "updock_health_restarts_total 2" in text
+
+
+def test_lifespan_starts_health_monitor(up, health, monkeypatch):
+    with TestClient(main.app):
+        pass
+    assert SyncThread.started == [health.loop]
+
+

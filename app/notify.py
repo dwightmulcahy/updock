@@ -13,8 +13,10 @@ from .email_render import html_body, text_body, title
 
 log = logging.getLogger("updock")
 
-ALL_EVENTS = ("update", "rollback", "error", "available", "approval", "deploy", "disk", "delete")
-DEFAULT_EVENTS = ("update", "rollback", "error", "available", "approval", "disk")
+ALL_EVENTS = ("update", "rollback", "error", "available", "approval", "deploy", "disk", "delete",
+              "unhealthy", "healthy")
+DEFAULT_EVENTS = ("update", "rollback", "error", "available", "approval", "disk", "unhealthy",
+                  "healthy")
 
 
 class EmailNotifier:

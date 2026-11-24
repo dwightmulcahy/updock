@@ -28,7 +28,7 @@ class Writer:
         return "\n".join(self.lines) + "\n"
 
 
-def render(up, rows, version, commit, log_counts):
+def render(up, rows, version, commit, log_counts, health=None):
     """`rows` = up.list(); `log_counts` = {level: n} since start."""
     w = Writer()
     w.metric("updock_build_info", "gauge", "Updock version.",
@@ -77,6 +77,14 @@ def render(up, rows, version, commit, log_counts):
                  [({}, d["max"] or 0)])
         w.metric("updock_disk_warn_bytes", "gauge", "Configured warning level (0 = none).",
                  [({}, d["warn"] or 0)])
+    if health is not None and health.enabled:
+        w.metric("updock_container_unhealthy", "gauge",
+                 "1 while the health monitor sees the container as unhealthy.",
+                 [({"container": n}, 1 if st.get("status") == "unhealthy" else 0)
+                  for n, st in sorted(health.state.items())])
+        w.metric("updock_health_restarts_total", "counter",
+                 "Restarts of unhealthy containers by the health monitor since start.",
+                 [({}, health.restarts_total)])
     w.metric("updock_scrape_timestamp_seconds", "gauge", "When these metrics were generated.",
              [({}, time.time())])
     return w.text()
