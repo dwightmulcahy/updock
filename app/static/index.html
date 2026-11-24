@@ -1118,7 +1118,7 @@ async function loadAbout() {
     st.cooldown && ["Cooldown", `${st.cooldown}s`], st.allow && ["Allowed without approval", `${st.allow} updates`], ["Lifecycle hooks", yn(st.hooks)],
     st.scope && ["Scope", st.scope],
     ["Health monitor", st.health_monitor ? `every ${st.health_monitor}s` : "off"],
-    ["Self-update", yn(st.self_update)],
+    ["Self-update", yn(st.self_update)], ["Public summary API", yn(st.public_api)],
     (st.insecure_registries || []).length && ["Plain-HTTP registries", st.insecure_registries.join(", ")],
     ["Email", n.enabled ? `to ${(n.to || []).join(", ")} via ${n.server}` : "off"],
   ]);

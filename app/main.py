@@ -175,6 +175,7 @@ HEALTH = HealthMonitor(
     history_seconds=parse_duration(os.getenv("UPDOCK_HEALTH_HISTORY", "7d")))
 SELF = SelfUpdater(up.d, up, NOTIFIER, data_dir=STORE.dir if STORE else None, version=VERSION,
                    allowed=env_bool("UPDOCK_ALLOW_SELF_UPDATE", False))
+PUBLIC_API = env_bool("UPDOCK_PUBLIC_API", False)
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("UPDOCK_ALLOWED_ORIGINS", "").split(",")
                    if o.strip()}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -390,7 +391,8 @@ def csrf_violation(request):
 
 async def basic_auth(request: Request, call_next):
     path = request.url.path
-    public = path in PROBES or (METRICS_PUBLIC and path == "/metrics")
+    public = path in PROBES or (METRICS_PUBLIC and path == "/metrics") or \
+        (PUBLIC_API and path.startswith("/api/public/"))
     h = request.headers.get("authorization", "")
     if h.startswith("Bearer ") and (path.startswith("/api/") or path == "/metrics"):
         # API token for scripts, CI webhooks and Prometheus: never falls back to Basic
@@ -807,7 +809,8 @@ def about(request):
             "startup_grace": up.startup_grace, "cooldown": up.cooldown, "hooks": up.hooks,
             "scope": up.scope, "allow": up.allow,
             "insecure_registries": sorted(getattr(up.registry, "insecure", ()) or ()),
-            "health_monitor": HEALTH.interval or None, "self_update": SELF.allowed},
+            "health_monitor": HEALTH.interval or None, "self_update": SELF.allowed,
+            "public_api": PUBLIC_API},
         "notify": NOTIFIER.describe(), "auth": auth_mode(), "api_token": bool(API_TOKEN),
         "data_dir": STORE.dir if STORE else None, "registry_logins": len(LOGINS.list()),
     }
@@ -902,6 +905,39 @@ def self_update(request):
                                         getattr(request.state, "user", None) or "admin",
                                         extra={"event": "self-update"})
     return bg(SELF.start_safely)
+
+
+SUMMARY_TTL = 15
+_summary = {"t": 0.0, "data": None}
+
+
+def summary_data():
+    rows = up.list()
+    eligible = [r for r in rows if r.get("eligible")]
+    problems = {"error", "rolled-back", "auth-required", "unverified", "rate-limited"}
+    out = {
+        "version": VERSION, "containers": len(rows), "running": sum(
+            1 for r in rows if r.get("state") == "running"), "monitored": len(eligible),
+        "updates_available": sum(1 for r in eligible if r.get("update_available")),
+        "problems": sum(1 for r in eligible if r.get("job") in problems),
+        "unhealthy": sum(1 for st in HEALTH.state.values() if st.get("status") == "unhealthy")
+        if HEALTH.enabled else None,
+        "last_run": {k: up.last_run.get(k) for k in ("t", "kind", "duration")}
+        if up.last_run else None,
+        "next_run": next_run["t"],
+    }
+    out["is_update_available"] = out["updates_available"] > 0
+    return out
+
+
+@route("/api/public/summary", "GET")
+def public_summary(request):
+    """Counts only (no container names) for dashboard widgets such as Homepage. Served
+    without login when UPDOCK_PUBLIC_API=true; cached for a few seconds."""
+    now = time.monotonic()
+    if _summary["data"] is None or now - _summary["t"] > SUMMARY_TTL:
+        _summary.update(t=now, data=summary_data())
+    return _summary["data"]
 
 
 @route("/api/projects/{project}/{action}", "POST")

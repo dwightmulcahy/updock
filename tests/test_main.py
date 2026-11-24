@@ -937,3 +937,27 @@ def test_self_update_needs_admin_password(client, up, selfu, monkeypatch):
     assert client.post("/api/self/update", json={"password": "pw"}, headers=h).status_code == 202
 
 
+def test_public_summary(client, up, health, monkeypatch):
+    main._summary.update(t=0.0, data=None)
+    monkeypatch.setitem(main.next_run, "t", None)
+    up.list.return_value = [
+        {"name": "a", "eligible": True, "state": "running", "update_available": True},
+        {"name": "b", "eligible": True, "state": "exited", "job": "error"},
+        {"name": "c", "eligible": False, "state": "running", "update_available": True}]
+    up.last_run = {"t": 5, "kind": "check", "duration": 1.5, "results": {}}
+    monkeypatch.setattr(main, "UI_PASS", "pw")
+    assert client.get("/api/public/summary").status_code == 401  # off by default
+    monkeypatch.setattr(main, "PUBLIC_API", True)
+    s = client.get("/api/public/summary").json()
+    assert s == {"version": main.VERSION, "containers": 3, "running": 2, "monitored": 2,
+                 "updates_available": 1, "problems": 1, "unhealthy": 1,
+                 "last_run": {"t": 5, "kind": "check", "duration": 1.5}, "next_run": None,
+                 "is_update_available": True}
+    up.list.return_value = []
+    assert client.get("/api/public/summary").json()["containers"] == 3  # cached
+    monkeypatch.setattr(main, "SUMMARY_TTL", -1)
+    health.enabled = False
+    up.last_run = {}
+    s = client.get("/api/public/summary").json()
+    assert s["containers"] == 0 and s["unhealthy"] is None and s["last_run"] is None
+    assert client.get("/api/containers").status_code == 401  # only /api/public/ is open
