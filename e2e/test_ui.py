@@ -234,3 +234,17 @@ def test_delete_container_needs_name_and_password(page, up, monkeypatch):
     expect(dlg).to_be_hidden()
     expect(row(page, "web")).to_have_count(0, timeout=10000)
     assert "web" not in up.d.ctrs
+
+
+def test_logs_newest_first(page, up):
+    import logging
+    up._log("first message", container="db", event="check")
+    up._log("second message", container="db", event="check")
+    up._log("third message", container="db", event="check")
+    page.goto(page.url.split("#")[0] + "#logs")
+    msgs = page.locator("#logs .le .m")
+    expect(msgs.first).to_have_text("third message")
+    texts = msgs.all_text_contents()
+    assert texts.index("third message") < texts.index("second message") < texts.index("first message")
+    up._log("fourth message", logging.WARNING, "db", "check")  # live: arrives on top
+    expect(msgs.first).to_have_text("fourth message", timeout=5000)
