@@ -1,9 +1,10 @@
+import json
 import base64
 import logging
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from app import main
 
@@ -739,3 +740,47 @@ def test_admin_password_throttled_after_repeated_failures(client, up, monkeypatc
     monkeypatch.setattr(main.time, "monotonic", lambda: t)
     r = client.post(url, json={"override_cooldown": True, "password": "s3cret"}, headers=h)
     assert r.status_code == 202 and not main._admin_fails["testclient"]
+
+
+# ---------- web layer (Starlette) ----------
+
+def test_json_encoding_of_sets_dates_paths():
+    from datetime import datetime, timezone
+    from pathlib import Path
+    out = main.JSON({"s": {1}, "t": (2,), "d": datetime(2026, 1, 2, tzinfo=timezone.utc),
+                     "p": Path("/x"), "u": "é"}).body
+    assert json.loads(out) == {"s": [1], "t": [2], "d": "2026-01-02T00:00:00+00:00", "p": "/x",
+                               "u": "é"}
+    with pytest.raises(TypeError):
+        main._json_default(object())
+
+
+def test_query_parameter_validation(client, up):
+    r = client.post("/api/containers/web/update?force=maybe")
+    assert r.status_code == 422 and r.json() == {"detail": "query parameter 'force' must be true or false"}
+    assert client.post("/api/containers/web/update?force=yes").status_code == 202
+    up.update.assert_called_with("web", True)
+    assert client.post("/api/containers/web/pin?pinned=0").json() == {"name": "web", "pinned": False}
+    assert client.get("/api/logs?limit=ten").json()["detail"] == "query parameter 'limit' must be an integer"
+    assert client.get("/api/logs?since=soon").json()["detail"] == "query parameter 'since' must be a number"
+    assert client.get("/api/logs?since=&after=").status_code == 200
+
+
+def test_body_validation(client, up):
+    url = "/api/containers/web/update"
+    for raw, why in (("{nope", "must be JSON"), ("[1]", "must be a JSON object"),
+                     ('{"override_cooldown": "yes"}', "'override_cooldown' must be a bool")):
+        r = client.post(url, content=raw, headers={"Content-Type": "application/json"})
+        assert r.status_code == 422 and why in r.json()["detail"], raw
+    assert client.post(url, json={"override_cooldown": None}).status_code == 202  # null = default
+    r = client.post("/api/registries", json={"host": "ghcr.io", "username": "me"})
+    assert r.status_code == 422 and r.json()["detail"] == "'password' is required"
+    r = client.post("/api/registries")
+    assert r.status_code == 422 and r.json()["detail"] == "'host' is required"
+
+
+def test_unknown_routes_and_methods_are_json(client):
+    r = client.get("/api/nope")
+    assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
+    r = client.get("/api/containers/web/update")
+    assert r.status_code == 405 and r.json() == {"detail": "Method Not Allowed"}
