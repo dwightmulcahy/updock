@@ -235,6 +235,20 @@ After an update to a new image, the superseded image is deleted: any other tags 
 
 Probes without auth: `/livez` (process up), `/readyz` (Docker reachable, else 503; used by the image's `HEALTHCHECK`), `/startupz` (scheduler started), plus `/health` (version).
 
+### Summary for dashboards
+
+`GET /api/public/summary` returns counts only, no container names: `{"version", "containers", "running", "monitored", "updates_available", "problems", "unhealthy", "is_update_available", "last_run": {"t", "kind", "duration"}, "next_run"}` (cached for 15 s). It needs the usual login or API token unless `UPDOCK_PUBLIC_API=true`, which serves everything under `/api/public/` without login, for widgets such as Homepage's `customapi`:
+
+```yaml
+- Updock:
+    widget:
+      type: customapi
+      url: http://updock:8080/api/public/summary
+      mappings:
+        - { field: updates_available, label: Updates }
+        - { field: problems, label: Problems }
+```
+
 ```yaml
 scrape_configs:
   - job_name: updock
@@ -292,6 +306,7 @@ The same entries go to stdout (`docker logs updock`) as text or JSON lines.
 | Check / update selected | `POST /api/selected/check`, `POST /api/selected/update` with `{"names": [...]}` |
 | Health monitor | `GET /api/health`, `GET /api/health/history`, `POST /api/health/check` |
 | Self-update | `GET /api/self`, `POST /api/self/check`, `POST /api/self/update` |
+| Counts for dashboards | `GET /api/public/summary` (no login with `UPDOCK_PUBLIC_API=true`) |
 | Logs (filters: `level`, `container`, `event`, `q`, `after`, `since`, `limit`) | `GET /api/logs` |
 | Download logs (`fmt=text\|json`, same filters) | `GET /api/logs/download` |
 | Image storage vs. limits | `GET /api/disk` |
@@ -351,6 +366,7 @@ The header is only believed on requests that come from a trusted proxy address; 
 | `UPDOCK_HEALTH_HISTORY` | `7d` | How long health history is kept |
 | `UPDOCK_ALLOW_SELF_UPDATE` | `false` | Allow [self-update](#self-update) from the About tab / API |
 | `UPDOCK_SELF` | hostname | Updock's container name, if you changed its hostname |
+| `UPDOCK_PUBLIC_API` | `false` | Serve `/api/public/summary` without login |
 | `UPDOCK_INSECURE_REGISTRIES` | empty | Registries reached over plain HTTP (`registry.lan:5000`, comma-separated) |
 | `UPDOCK_REGISTRY_CA` | empty | PEM file with extra CA certificates for registry checks |
 | `UPDOCK_COOLDOWN` | `0` | Minimum image age before scheduled runs apply it (`90`, `30m`, `24h`, `3d12h`, `2w`, `1M`) |
