@@ -1544,18 +1544,22 @@ class Updater:
         return sorted({(c.get("Labels") or {}).get(COMPOSE_PROJECT)
                        for c in self.d.containers(all=True)} - {None, ""})
 
-    def run_all(self, update=True, project=None):
+    def run_all(self, update=True, project=None, names=None):
         """Check (or update) every eligible container, Compose dependencies first.
-        `project` limits the run to one Compose project."""
+        `project` limits the run to one Compose project, `names` to the containers
+        selected in the UI (stopped ones included: they were picked by hand)."""
         if self.run:
             self._log("a run is already in progress; request ignored", logging.WARNING,
                       event="run")
             return False
         t0 = time.monotonic()
         self.counters["runs"] += 1
+        picked = set(names) if names is not None else None
         self._log(f"run started ({'update' if update else 'check only'}"
-                  f"{f', project {project}' if project else ''})", event="run")
+                  f"{f', project {project}' if project else ''}"
+                  f"{f', {len(picked)} selected' if picked is not None else ''})", event="run")
         self.run = {"kind": "update" if update else "check", "project": project,
+                    "selected": len(picked) if picked is not None else None,
                     "total": 0, "done": 0,
                     "current": None, "started": time.time(), "results": Counter()}
         self._publish_run()
@@ -1564,10 +1568,12 @@ class Updater:
                 if update and not self._disk_gate():
                     update = False
                     self.run["kind"] = "check"
-                targets = [c for c in compose_order(self.d.containers(all=self.include_stopped))
+                listing = self.d.containers(all=self.include_stopped or picked is not None)
+                targets = [c for c in compose_order(listing)
                            if self.eligible(c) and (project is None or
                                                     (c.get("Labels") or {}).get(COMPOSE_PROJECT)
-                                                    == project)]
+                                                    == project)
+                           and (picked is None or c["Names"][0].lstrip("/") in picked)]
                 self.queue = {c["Names"][0].lstrip("/") for c in targets}
                 self.run["total"] = len(targets)
                 self._publish_run()
@@ -1593,6 +1599,7 @@ class Updater:
             summary = self.run_status()
             self.last_run = {"t": time.time(), "duration": time.monotonic() - t0,
                              "kind": summary["kind"], "project": project,
+                             "selected": summary["selected"],
                              "total": summary["total"],
                              "results": summary["results"]}
             self.run, self.queue = None, set()

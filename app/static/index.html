@@ -201,6 +201,10 @@
   #cpass[hidden], #dpass[hidden] { display:none; }
   #dmsg { color:var(--err); }
   #dname, #dpass { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  input.sel { margin:0 6px 0 0; vertical-align:middle; }
+  #selbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 10px; padding:8px 12px;
+            border:1px solid var(--line); border-radius:8px; }
+  #selbar[hidden] { display:none; }
   .prot-badge { background:var(--line); }
   .badge.unhealthy { background:var(--warn); color:#fff; }
   .version-badge.has-update::after { content:" ↑"; color:var(--accent); }
@@ -270,9 +274,15 @@
       <button class="gall" id="gexpand" hidden onclick="setAllGroups(false)">Expand all</button>
     </div>
   </div>
+  <div id="selbar" hidden role="region" aria-label="Selected containers">
+    <span class="meta" id="selcount"></span>
+    <button onclick="runSelected('check')">Check selected</button>
+    <button class="primary" onclick="runSelected('update')">Update selected</button>
+    <button onclick="clearSel()">Clear selection</button>
+  </div>
   <table>
     <colgroup><col class="c-name"><col class="c-ver"><col class="c-chk"><col class="c-act"></colgroup>
-    <thead><tr><th>Container</th><th>Version</th><th class="h-chk">Checked</th><th></th></tr></thead>
+    <thead><tr><th><input type="checkbox" class="sel" id="selall" title="Select all shown" aria-label="Select all shown containers">Container</th><th>Version</th><th class="h-chk">Checked</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </section>
@@ -653,8 +663,9 @@ function rowHtml(c, inGroup) {
                    (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "") +
                    (c.protected ? ' <span class="badge prot-badge" title="updock.protected=true: only checked, never stopped or updated">protected</span>' : "") +
                    (c.health && c.health.status === "unhealthy" ? ` <span class="badge unhealthy" title="Health monitor: ${esc(c.health.failures)} failed checks, ${esc(c.health.restarts)} restarts">unhealthy</span>` : "");
+    const box = c.eligible ? `<input type="checkbox" class="sel" aria-label="Select ${esc(c.name)}" ${SEL.has(c.name) ? "checked" : ""} onclick="event.stopPropagation();toggleSel(this.closest('tr').dataset.name, this.checked)">` : "";
     return `<tr class="row ${c.state === "running" ? "" : "stopped"} ${open ? "open" : ""} ${inGroup ? "ingrp" : ""}" data-name="${esc(c.name)}" onclick="toggleRow(this.dataset.name)">
-      <td><div class="nm"><span class="chev">▶</span>${statusIcon(c, st)}${esc(c.name)}${badges}</div>
+      <td><div class="nm">${box}<span class="chev">▶</span>${statusIcon(c, st)}${esc(c.name)}${badges}</div>
           <div class="sub" title="${esc(c.image)}">${stateLine(c)} · ${esc(c.image)}</div>
           ${c.progress != null ? `<div class="bar" title="${c.progress}%"><i style="width:${Number(c.progress)}%"></i></div>` : ""}
           ${progressBlock(c)}
@@ -732,7 +743,7 @@ function renderRun() {
     const pct = active.total ? Math.round(100 * active.done / active.total) : 0;
     const verb = active.kind === "update" ? "Updating" : "Checking";
     bar.className = ""; bar.hidden = false;
-    bar.innerHTML = `<span class="spin"></span><span class="rb-text">${verb} ${active.project ? `project <b>${esc(active.project)}</b>` : "containers"} ` +
+    bar.innerHTML = `<span class="spin"></span><span class="rb-text">${verb} ${active.project ? `project <b>${esc(active.project)}</b>` : active.selected ? "selected containers" : "containers"} ` +
       (active.total ? `${active.done + (active.current ? 1 : 0) > active.total ? active.total : active.done + (active.current ? 1 : 0)} of ${active.total}` : "…") +
       (active.current ? ` · <span class="rb-cur">${esc(active.current)}</span>` : "") +
       ` · <span data-since="${active.started}">${mmss(Date.now() / 1000 - active.started)}</span></span>` +
@@ -783,6 +794,7 @@ async function refresh() {
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     if (d.user) nx.textContent += ` · ${d.user}`;
     DATA = d.containers; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
+    pruneSel();
     $("nav-health").hidden = !DATA.some(c => "health" in c);
     RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;
     if (RUN) optimistic = null;
@@ -961,6 +973,43 @@ setInterval(() => { if (live) refresh(); }, 30000);   // slow safety refresh whe
   set();
   if (window.ResizeObserver) new ResizeObserver(set).observe(top); else addEventListener("resize", set);
 })();
+
+// ---- selecting rows: check / update just those ----
+const SEL = new Set();
+function renderSel() {
+  $("selbar").hidden = !SEL.size;
+  $("selcount").textContent = `${SEL.size} selected`;
+  const shown = [...document.querySelectorAll("#rows input.sel")];
+  $("selall").checked = shown.length > 0 && shown.every(b => b.checked);
+}
+function toggleSel(name, on) { on ? SEL.add(name) : SEL.delete(name); renderSel(); }
+function clearSel() { SEL.clear(); render(); renderSel(); }
+function pruneSel() {
+  const ok = new Set(DATA.filter(c => c.eligible).map(c => c.name));
+  for (const n of [...SEL]) if (!ok.has(n)) SEL.delete(n);
+}
+$("selall").addEventListener("click", ev => {
+  ev.stopPropagation();
+  document.querySelectorAll("#rows tr.row").forEach(tr => {
+    const c = DATA.find(x => x.name === tr.dataset.name);
+    if (c && c.eligible) ev.target.checked ? SEL.add(c.name) : SEL.delete(c.name);
+  });
+  render(); renderSel();
+});
+async function runSelected(kind) {
+  const names = [...SEL];
+  if (!names.length || (kind === "update" && !confirm(`Update ${names.length} selected container(s) that have a newer image?`))) return;
+  optimistic = { kind, selected: names.length, total: names.length, done: 0, current: null, started: Date.now() / 1000 };
+  renderRun();
+  const r = await fetch(`/api/selected/${kind}`, { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Updock-Request": "1" }, body: JSON.stringify({ names }) });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.detail || `Failed (${r.status})`); }
+  else clearSel();
+  setTimeout(() => { optimistic = null; renderRun(); }, 1500);
+  setTimeout(refresh, 300);
+}
+const _render = render;
+render = function () { _render(); renderSel(); };
 
 // ---- health monitor tab ----
 async function loadHealth() {

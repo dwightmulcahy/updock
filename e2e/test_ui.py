@@ -310,6 +310,27 @@ def test_whats_new_after_upgrade(page, monkeypatch, tmp_path):
     expect(page.locator("#wtitle")).to_have_text("What's new in Updock")
 
 
+def test_select_rows_and_check_selected(page, up):
+    for name in ("web", "db"):
+        row(page, name).locator("input.sel").check()
+    expect(page.locator("#selbar")).to_be_visible()
+    expect(page.locator("#selcount")).to_have_text("2 selected")
+    page.get_by_role("button", name="Check selected").click()
+    expect(page.locator("#runbar")).to_contain_text("finished", timeout=10000)
+    expect(page.locator("#runbar")).to_contain_text("2 containers")
+    assert up.state["web"]["job"] == "update-available" and up.state["db"]["job"] == "up-to-date"
+    assert "job" not in up.state.get("private", {})
+    expect(page.locator("#selbar")).to_be_hidden()
+
+
+def test_select_all_shown(page):
+    page.fill("#q", "web")
+    page.locator("#selall").check()
+    expect(page.locator("#selcount")).to_have_text("1 selected")
+    page.get_by_role("button", name="Clear selection").click()
+    expect(page.locator("#selbar")).to_be_hidden()
+
+
 def test_protected_container(page, up):
     up.d.ctrs["db"]["Config"]["Labels"]["updock.protected"] = "true"
     page.reload()
