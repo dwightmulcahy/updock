@@ -2,6 +2,7 @@
 import time
 
 RESULTS = ("updated", "recreated", "rolled_back", "failed", "check_failed", "skipped", "cooldown",
+           "protected",
            "rate_limited", "auth_required", "unverified", "approval")
 
 

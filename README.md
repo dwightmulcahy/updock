@@ -114,6 +114,8 @@ Paths on volumes or bind mounts are skipped (they survive anyway), as are missin
 
 Docker Compose projects are handled as a unit: within a project, services are updated after the services they `depends_on`; services with `depends_on: {<svc>: {restart: true}}` are restarted when that service is recreated (as `docker compose` would); and the `com.docker.compose.image` label is updated so a later `docker compose up -d` leaves Updock's containers alone instead of recreating them.
 
+For dependencies Compose can't express (across projects, or plain `docker run` containers), use the label `updock.depends-on` with container names: `updock.depends-on=db,cache` updates `db` and `cache` first in every run; `updock.depends-on=db:restart` also restarts this container whenever `db` is recreated.
+
 Env vars, cmd, entrypoint, etc. that came from the old image are dropped so the new image's defaults apply; values you set yourself are kept.
 
 ### Lifecycle hooks
@@ -123,8 +125,11 @@ With `UPDOCK_HOOKS=true`, containers can declare commands that Updock runs insid
 | Label | Runs | On failure |
 |---|---|---|
 | `updock.hook.pre-check` | before each check | logged, continue |
-| `updock.hook.pre-update` | before the old container is stopped | exit `75` skips this update (try again next run); any other non-zero exit aborts it |
+| `updock.hook.pre-stop` | before the container is stopped: the one being updated, containers sharing its network (`network_mode: container:…`), and containers restarted because they depend on it | update target or network sharer: exit `75` skips, any other non-zero exit aborts the update before anything is stopped; restarted dependent: that restart is skipped |
+| `updock.hook.pre-update` | before the old container is stopped (after `pre-stop`) | exit `75` skips this update (try again next run); any other non-zero exit aborts it |
 | `updock.hook.post-update` | after the new container passed its health check | logged |
+| `updock.hook.pre-rollback` | in the failed new container (if still running), before it's removed | logged; rollback continues |
+| `updock.hook.post-rollback` | in the restored old container, after it's started again | logged |
 | `updock.hook.post-check` | after each check/update, even if it failed | logged |
 
 Values run with `sh -c`, or give a JSON array (`["/app/backup","--fast"]`) for images without a shell. Each hook has a `-timeout` label (default `60s`, `0` = none), e.g. `updock.hook.pre-update-timeout=10m`. Hooks only run in running containers, and their exit code and output tail go to the log (`hook` events).
@@ -208,7 +213,7 @@ After an update to a new image, the superseded image is deleted: any other tags 
 
 ## Monitoring
 
-`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown|rate_limited"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
+`GET /metrics` serves Prometheus metrics: containers by state, monitored/pinned counts, per-container `update_available`, status and last check/update times, outcome counters (`updock_results_total{result="updated|recreated|rolled_back|failed|check_failed|skipped|cooldown|protected|rate_limited"}`), runs and run failures, last run time/duration, log messages by level, image storage vs. limits, and build info. It uses the UI login (Prometheus `basic_auth`) unless `UPDOCK_METRICS_PUBLIC=true`.
 
 Probes without auth: `/livez` (process up), `/readyz` (Docker reachable, else 503; used by the image's `HEALTHCHECK`), `/startupz` (scheduler started), plus `/health` (version).
 
@@ -343,6 +348,8 @@ The header is only believed on requests that come from a trusted proxy address; 
 - Several Updock instances on one host: give each `UPDOCK_SCOPE=<name>` and label its containers `updock.scope=<name>`. An instance without a scope ignores containers that have one.
 
 The **excluded** badge's tooltip says which rule applies.
+
+Protect a container with the label `updock.protected=true` (databases, the socket proxy, anything you only want to hear about): it's checked and shown like any other, and you get "update available" emails, but Updock refuses to stop, update, deploy, roll back or delete it, even from the UI or API (HTTP 409), and the health monitor won't restart it. An update of a container whose network a protected container shares (`network_mode: container:…`) is refused before anything is stopped, and a protected container that depends on a recreated one isn't restarted.
 
 Exclude a container: label `updock.enable=false`. **Pin** a container in the UI to keep it on its current image: scheduled runs still check it (and email if something new is available) but never update it; **Update now** still works. Stopped containers are listed too; scheduled runs update them only with `UPDOCK_INCLUDE_STOPPED=true`, and they stay stopped unless `UPDOCK_REVIVE_STOPPED=true` (or the label `updock.revive=true`) starts them after a new image is applied — health-checked like any other update, and a failed start leaves the original container stopped as it was. Pulls show a progress bar. Images pinned by digest are skipped. Updock never updates itself.
 

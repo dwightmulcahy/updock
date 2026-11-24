@@ -27,6 +27,7 @@ def up(monkeypatch):
     m.list.return_value = [{"name": "web"}]
     m.run, m.last_run = None, {}
     m.run_status.return_value = None
+    m.protected.return_value = False
     monkeypatch.setattr(main, "up", m)
     monkeypatch.setattr(main.threading, "Thread", SyncThread)
     monkeypatch.setattr(main, "UI_PASS", "")
@@ -827,3 +828,18 @@ def test_version_policy_endpoint(client, up):
     assert client.post(url, json={"policy": "invalid"}).status_code == 422
     up.d.inspect.side_effect = KeyError("web")
     assert client.post(url, json={"policy": "inherit"}).status_code == 404
+
+
+# ---------- more endpoint tests ----------
+
+def test_protected_refused_by_endpoints(client, up):
+    up.protected.return_value = True
+    for path, kw in (("/api/containers/web/update", {}), ("/api/containers/web/deploy?tag=1", {}),
+                     ("/api/containers/web/rollback", {}),
+                     ("/api/containers/web/delete", {"json": {}})):
+        r = client.post(path, **kw)
+        assert r.status_code == 409 and "is protected" in r.json()["detail"], path
+    up.update.assert_not_called()
+    up.delete.assert_not_called()
+
+

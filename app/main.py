@@ -39,7 +39,7 @@ from .registry import Registry
 from .schedule import Cron, Window, parse_duration
 from .store import Store
 from .units import parse_size, parse_threshold
-from .updater import Updater
+from .updater import Updater, protected_message
 
 from . import logs as logmod
 
@@ -504,6 +504,13 @@ def check(request):
 
 
 UPDATE_BODY = {"override_cooldown": (bool, False), "approve": (bool, False), "password": (str, "")}
+
+
+def refuse_protected(name):
+    if up.protected(name):
+        raise HTTPException(409, protected_message(name))
+
+
 DELETE_BODY = {"remove_image": (bool, False), "remove_volumes": (bool, False), "password": (str, "")}
 LOGIN_BODY = {"host": (str, ...), "username": (str, ...), "password": (str, ...)}
 
@@ -563,6 +570,7 @@ def version_policy(request):
 def update(request):
     name, force = request.path_params["name"], q_bool(request, "force", False)
     data = body(request, UPDATE_BODY)
+    refuse_protected(name)
     override = bool(data and data["override_cooldown"])
     approve = bool(data and data["approve"])
     if override or approve:
@@ -588,6 +596,7 @@ def delete(request):
     if not ALLOW_DELETE:
         raise HTTPException(403, "deleting containers is disabled (UPDOCK_ALLOW_DELETE=false)")
     require_admin(request, data["password"], name, "delete")
+    refuse_protected(name)
     try:
         up.d.inspect(name)
     except Exception as e:
@@ -633,12 +642,14 @@ def deploy(request):
     name, tag = request.path_params["name"], q_required(request, "tag")
     if not TAG_RE.match(tag):
         raise HTTPException(400, "invalid tag")
+    refuse_protected(name)
     return bg(up.deploy, name, tag)
 
 
 @route("/api/containers/{name}/rollback", "POST")
 def rollback(request):
     name = request.path_params["name"]
+    refuse_protected(name)
     return bg(up.rollback, name)
 
 
