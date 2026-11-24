@@ -217,6 +217,8 @@ scrape_configs:
 
 Set `UPDOCK_SMTP_HOST` and `UPDOCK_SMTP_TO` to get emails for updates, rollbacks, failed updates and (in check-only mode) newly available images. Everything that happens during one scheduled run arrives as a single email; manual actions email immediately. "Update available" is sent once per new image, not every run. Use **Test email** in the header to check the settings; every send (or failure) is in the logs as a `notify` event.
 
+Emails are HTML (with a plain-text copy for clients that prefer it): one card per event, colour-coded, with the image, old → new version and image ID, when each image was built, the Compose project, how long the update took, whether the old image was removed, the error or rollback reason, and buttons for the release notes and for opening Updock (`UPDOCK_URL`). Runs with several events start with a summary ("2 updated, 1 rolled back"). Update subjects include the new version: `[updock] swafarewatcher: updated to 0.20.0`.
+
 | Var | Default | |
 |---|---|---|
 | `UPDOCK_SMTP_HOST` | empty | SMTP server; empty disables email |

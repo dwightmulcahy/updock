@@ -146,7 +146,7 @@ STARTED = {"done": False}
 DISK_MAX = parse_size(os.environ["UPDOCK_DISK_MAX"]) if os.getenv("UPDOCK_DISK_MAX") else 0
 DISK_WARN = parse_threshold(os.environ["UPDOCK_DISK_WARN"], DISK_MAX) \
     if os.getenv("UPDOCK_DISK_WARN") else 0
-NOTIFIER = EmailNotifier.from_env(ENV)
+NOTIFIER = EmailNotifier.from_env(ENV, version=VERSION)
 up = Updater(Docker(), cleanup=env_bool("UPDOCK_CLEANUP", True),
              label_enable=env_bool("UPDOCK_LABEL_ENABLE", False), registry=Registry(),
              logbuf=LOGBUF, health_timeout=int(os.getenv("UPDOCK_HEALTH_TIMEOUT", "120")),

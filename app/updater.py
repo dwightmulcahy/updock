@@ -522,7 +522,8 @@ class Updater:
             self._set(name, job="auth-required", message=str(e), auth_host=e.host)
             self._log(str(e), logging.WARNING, name, "auth")
             if notify_errors:
-                self.notifier.notify("error", name, str(e))
+                self.notifier.notify("error", name, str(e),
+                                     {**self._context(name), "reason": str(e)})
         except RateLimited as e:
             self.counters["result_rate_limited"] += 1
             self._set(name, job="rate-limited", message=str(e))
@@ -535,17 +536,20 @@ class Updater:
             self.counters["result_unverified"] += 1
             self._set(name, job="unverified", message=str(e))
             self._log(str(e), logging.ERROR, name, "signature")
-            self.notifier.notify("error", name, str(e))
+            self.notifier.notify("error", name, str(e), {**self._context(name), "reason": str(e)})
         except UnhealthyError as e:
             self.counters["result_rolled_back"] += 1
             self._set(name, job="rolled-back", message=str(e))
             self._log(f"rolled back: {e}", logging.ERROR, name, "rollback")
-            self.notifier.notify("rollback", name, f"update rolled back: {e}")
+            self.notifier.notify("rollback", name, f"update rolled back: {e}",
+                                 {**self._context(name), "reason": str(e),
+                                  "duration": time.time() - self.state[name]["job_started"]})
         except Exception as e:
             self.counters["result_failed" if notify_errors else "result_check_failed"] += 1
             self._set(name, job="error", message=str(e))
             if notify_errors:
-                self.notifier.notify("error", name, f"{type(e).__name__}: {e}")
+                self.notifier.notify("error", name, f"{type(e).__name__}: {e}",
+                                     {**self._context(name), "reason": f"{type(e).__name__}: {e}"})
             expected = isinstance(e, (DockerError, RegistryError, CopyFileError))
             self._log(f"{type(e).__name__}: {e}", logging.ERROR, name, "error",
                       exc_info=None if expected else e)
@@ -642,6 +646,7 @@ class Updater:
             self._set(name, job="updating", step="pull" if name in self._unpulled else "stop",
                       message="Recreating")
             change = self._describe_change(ctr)  # before cleanup removes the old image
+            details = self._change_details(ctr)
             prev = self._previous_of(ctr)
             revive = avail and not ctr["State"]["Running"] and self.revives(ctr)
             if revive:
@@ -662,7 +667,9 @@ class Updater:
             self._log("updated" if avail else "recreated", container=name,
                       event="update" if avail else "recreate")
             if avail:
-                self.notifier.notify("update", name, change)
+                self.notifier.notify("update", name, change, {
+                    **details, "cleanup": self.cleanup,
+                    "duration": time.time() - self.state[name]["job_started"]})
         self._locked(name, self._with_check_hooks(name, job))
 
     def _with_check_hooks(self, name, job):
@@ -775,9 +782,34 @@ class Updater:
             latest = (self.state[name].get("latest") or {})
             key = latest.get("id") or latest.get("digest")
             if scheduled and avail and key != self.state[name].get("notified_available"):
-                self.notifier.notify("available", name, self._describe_change(ctr))
+                self.notifier.notify("available", name, self._describe_change(ctr),
+                                     self._change_details(ctr))
                 self._set(name, notified_available=key)
         self._locked(name, self._with_check_hooks(name, job), notify_errors=False)
+
+    def _change_details(self, ctr):
+        """Structured old/new image info for notification emails."""
+        name = ctr["Name"].lstrip("/")
+        old = self._image_info(ctr["Image"]) or {}
+        new = self.state[name].get("latest") or {}
+        labels = ctr["Config"].get("Labels") or {}
+        pick = lambda i: {k: i.get(k) for k in ("version", "id", "created")}
+        project = labels.get(COMPOSE_PROJECT)
+        return {"image": ctr["Config"]["Image"], "from": pick(old), "to": pick(new),
+                "target_ref": self.state[name].get("target_ref"),
+                "notes": self.changelog(new, labels.get(TEMPLATE_LABEL)),
+                "project": f"{project} / {labels.get(COMPOSE_SERVICE) or '?'}" if project else None}
+
+    def _context(self, name):
+        """Image and Compose info for error emails (best effort)."""
+        try:
+            ctr = self.d.inspect(name)
+        except Exception:
+            return {"image": self.state[name].get("ref")}
+        labels = ctr["Config"].get("Labels") or {}
+        project = labels.get(COMPOSE_PROJECT)
+        return {"image": ctr["Config"]["Image"],
+                "project": f"{project} / {labels.get(COMPOSE_SERVICE) or '?'}" if project else None}
 
     def _describe_change(self, ctr):
         """'test/app:latest 1.0.0 (8b0806bb9026) -> 2.0.0 (4b92afd055fd)'"""
@@ -846,13 +878,18 @@ class Updater:
             self._verify_signature(name, ctr, new_ref)
             self._set(name, job="updating", message=f"Deploying {new_ref}")
             prev = self._previous_of(ctr)
+            old_info = self._image_info(ctr["Image"]) or {}
+            new_info = self._image_info(self.d.image(new_ref)["Id"]) or {}
             # Keep the previous image so switching back is instant.
             self._recreate(ctr, image_ref=new_ref, cleanup=False)
             self._restart_compose_dependents(ctr)
             self._set(name, job="deployed", ref=new_ref, update_available=False, previous=prev,
                       latest=None, last_update=time.time(), message="")
             self._log(f"deployed {new_ref}", container=name, event="deploy")
-            self.notifier.notify("deploy", name, f"deployed {new_ref}")
+            pick = lambda i: {k: i.get(k) for k in ("version", "id", "created")}
+            self.notifier.notify("deploy", name, f"deployed {new_ref}", {
+                **self._context(name), "from": pick(old_info), "to": pick(new_info),
+                "duration": time.time() - self.state[name]["job_started"]})
         self._locked(name, job)
 
     def _verify_signature(self, name, ctr, ref):
@@ -913,7 +950,10 @@ class Updater:
                               "re-apply the newer image (unpin to resume)")
             self._log(f"rolled back to {ref} ({label}) and pinned", logging.WARNING, name,
                       "rollback")
-            self.notifier.notify("rollback", name, f"manually rolled back to {ref} ({label})")
+            pick = lambda i: {k: i.get(k) for k in ("version", "id", "created")}
+            self.notifier.notify("rollback", name, f"manually rolled back to {ref} ({label})", {
+                **self._context(name), "from": pick(back), "to": pick(prev),
+                "reason": "rolled back by hand; pinned so scheduled runs don't re-apply the newer image"})
         self._locked(name, job)
 
     def _restore_image(self, name, prev):

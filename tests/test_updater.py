@@ -872,8 +872,10 @@ class RecNotifier:
     def __init__(self):
         self.items, self.batches, self._batch = [], [], None
 
-    def notify(self, event, container, msg):
+    def notify(self, event, container, msg, details=None):
         (self._batch if self._batch is not None else self.items).append((event, container, msg))
+        self.details = getattr(self, "details", [])
+        self.details.append(details)
 
     def batch(self):
         import contextlib
@@ -2376,3 +2378,26 @@ def test_delete_forgets_saved_state(fake, tmp_path):
     u.state["web"]["pinned"] = True
     u.delete("web")
     assert "web" not in Updater(fake, store=Store(str(tmp_path))).state
+
+
+def test_update_email_details(fake):
+    fake.images[OLD_IMG]["Config"] = {**IMG_CFG, "Labels": {"org.opencontainers.image.version": "1.0",
+                                                            "com.docker.compose.project": "p"}}
+    c = make_ctr()
+    c["Config"]["Labels"] = {**c["Config"]["Labels"], "com.docker.compose.project": "shop",
+                             "com.docker.compose.service": "web"}
+    fake.add(c)
+    publish_new(fake)
+    rec = RecNotifier()
+    u = Updater(fake, notifier=rec)
+    u.update("web")
+    d = rec.details[-1]
+    assert d["image"] == "test/app:latest" and d["from"]["version"] == "1.0"
+    assert d["project"] == "shop / web" and d["cleanup"] is True and d["duration"] >= 0
+
+
+def test_error_email_context_survives_missing_container(fake):
+    rec = RecNotifier()
+    u = Updater(fake, notifier=rec)
+    u.state["ghost"]["ref"] = "test/ghost:1"
+    assert u._context("ghost") == {"image": "test/ghost:1"}
