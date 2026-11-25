@@ -162,10 +162,24 @@ jobs:
           else
             flags+=(--latest=false)
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; refreshing notes"
-            gh release edit "$TAG" "${flags[@]}"
-                      else
-            gh release create "$TAG" --verify-tag "${flags[@]}"
+          # GitHub's API sometimes answers 5xx (v0.9.1 failed on a one-off 502). Retry with
+          # backoff; each attempt checks again whether the release exists, since a request
+          # that errored may still have created it.
+          ok=""
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG exists; refreshing notes"
+              gh release edit "$TAG" "${flags[@]}" && ok=1 && break
+            else
+              gh release create "$TAG" --verify-tag "${flags[@]}" && ok=1 && break
+            fi
+            if [[ $attempt -lt 5 ]]; then
+              echo "::warning::GitHub API call failed (attempt $attempt of 5); retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+            fi
+          done
+          if [[ -z "$ok" ]]; then
+            echo "::error::could not create or update release $TAG after 5 attempts"
+            exit 1
           fi
           cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
