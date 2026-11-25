@@ -62,3 +62,9 @@ def test_additional_release_note_categories(_subjects, _previous):
     assert "## 🔒 Security" in notes
     assert "## ⚡ Performance" in notes
     assert "## 🎨 Styles" in notes
+
+
+@patch("scripts.generate_release_notes.previous_tag", return_value=None)
+@patch("scripts.generate_release_notes.commit_subjects", return_value=[("abc1234", "fix: x")])
+def test_no_docker_section_without_image(_subjects, _previous):
+    assert "## 🐳 Docker" not in render("v0.1.0", "owner/app", "My App", "")
