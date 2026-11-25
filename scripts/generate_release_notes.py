@@ -113,18 +113,19 @@ def render(tag: str, repository: str, project_name: str, image: str) -> str:
     remaining = [entry for entries in grouped.values() for entry in entries]
     if remaining:
         lines.extend(["## 🔧 Other changes", "", *remaining, ""])
-    lines.extend(
-        [
-            "## 🐳 Docker",
-            "",
-            "```bash",
-            f"docker pull {image}:{version}",
-            "```",
-            "",
-            "Multi-architecture image: `linux/amd64` and `linux/arm64`.",
-            "",
-        ]
-    )
+    if image:
+        lines.extend(
+            [
+                "## 🐳 Docker",
+                "",
+                "```bash",
+                f"docker pull {image}:{version}",
+                "```",
+                "",
+                "Multi-architecture image: `linux/amd64` and `linux/arm64`.",
+                "",
+            ]
+        )
     if repository and previous:
         lines.append(
             f"**Full changelog:** https://github.com/{repository}/compare/{previous}...{tag}"
@@ -139,7 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
     parser.add_argument("--project-name", required=True)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--image", default="")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.write_text(
