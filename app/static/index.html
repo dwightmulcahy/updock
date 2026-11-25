@@ -57,7 +57,8 @@
            font-size:12px; font-weight:700; line-height:1; background:var(--line); color:var(--dim); }
   .sicon.ok { background:var(--ok-bg); color:var(--ok); } .sicon.up { background:var(--warn-bg); color:var(--warn); }
   .sicon.bad { background:var(--err-bg); color:var(--err); } .sicon.roll { background:var(--roll-bg); color:var(--warn); }
-  .sicon.cool { background:var(--cool-bg); color:var(--cool); } .sicon.purple { background:var(--purple-bg); color:var(--purple); }
+  .sicon.cool { background:var(--cool-bg); color:var(--cool); }
+  .badge.cool-badge { background:var(--cool-bg); color:var(--cool); } .cool-note { color:var(--cool); } .sicon.purple { background:var(--purple-bg); color:var(--purple); }
   .sicon.flag { background:var(--warn); color:#fff; }
   .sicon.busy { background:var(--info-bg); color:var(--accent); } .sicon .spin { margin:0; width:10px; height:10px; }
   .vh { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
@@ -493,11 +494,29 @@ const PROBLEM = new Set(["error", "rolled-back", "auth-required", "rate-limited"
 const FILTERS = {
   all: ["All", () => true],
   updates: ["Updates", c => c.update_available && c.eligible],
+  cooldown: ["Cooldown", c => inCooldown(c)],
   problems: ["Problems", c => PROBLEM.has(c.job)],
   running: ["Running", c => c.state === "running"],
   stopped: ["Stopped", c => c.state !== "running"],
   excluded: ["Excluded", c => !c.eligible],
 };
+// ---- cooldown: a newer image that waits until it's old enough ----
+let AUTO = true;  // scheduled runs apply updates (false: they only check)
+function inCooldown(c) { return !!(c.update_available && c.eligible && c.cooldown); }
+function leftText(sec) {
+  if (sec <= 60) return "any minute now";
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  return (d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`) + " left";
+}
+function coolText(c) {
+  const cd = c.cooldown, span = cd.delay ? `${Math.round(cd.delay / 3600)}h cooldown` : "cooldown";
+  if (!cd.until) return `in ${span} · no usable build date, so it isn't applied automatically: use Update…`;
+  const at = new Date(cd.until * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const left = leftText(cd.until - Date.now() / 1000);
+  if (!AUTO || c.pinned || c.monitor_only || c.protected)
+    return `in ${span} until ${at} (${left}) · scheduled runs only check this container, so update it yourself`;
+  return `in ${span} · applied by the first scheduled run after ${at} (${left})`;
+}
 const UI_KEY = "updock.view";
 let view = { q: "", filter: "all", sort: "attention", group: false, collapsed: [] };
 try { view = { ...view, ...JSON.parse(localStorage.getItem(UI_KEY) || "{}") }; } catch (e) {}
@@ -579,7 +598,8 @@ function stateLine(c) {
 function detailRow(c) {
   const cur = c.current ? imgCell(c.current) : '<span class="img">—</span>';
   const lat = c.latest ? (c.current && c.latest.id && c.latest.id === c.current.id ? '<span class="img">same as running</span>'
-                         : imgCell(c.latest, "newer") + (c.latest.note ? `<div class="img">${esc(c.latest.note)}</div>` : "")) : '<span class="img">not checked yet</span>';
+                         : imgCell(c.latest, "newer") + (c.latest.note ? `<div class="img">${esc(c.latest.note)}</div>` : "")
+                           + (inCooldown(c) ? `<div class="img cool-note">◷ ${esc(coolText(c))}</div>` : "")) : '<span class="img">not checked yet</span>';
   const flags = [c.pinned && "pinned in the UI: scheduled runs only check it", c.monitor_only && "label updock.monitor-only: scheduled runs only check it",
                  !c.eligible && `excluded: ${c.excluded}`,
                  c.protected && "label updock.protected: only checked; never stopped, updated, rolled back or deleted",
@@ -662,6 +682,7 @@ function rowHtml(c, inGroup) {
     const st = statusText(c), open = OPEN.has(c.name);
     const badges = (c.pinned ? ' <span class="badge pinned-badge">pinned</span>' : "") +
                    (c.monitor_only && !c.pinned ? ' <span class="badge pinned-badge">monitor only</span>' : "") +
+                   (inCooldown(c) ? ` <span class="badge cool-badge" title="${esc(coolText(c))}">cooldown${c.cooldown.until ? ` · ${esc(leftText(c.cooldown.until - Date.now() / 1000))}` : ""}</span>` : "") +
                    (c.protected ? ' <span class="badge prot-badge" title="updock.protected=true: only checked, never stopped or updated">protected</span>' : "") +
                    (c.health && c.health.status === "unhealthy" ? ` <span class="badge unhealthy" title="Health monitor: ${esc(c.health.failures)} failed checks, ${esc(c.health.restarts)} restarts">unhealthy</span>` : "");
     const box = c.eligible ? `<input type="checkbox" class="sel" aria-label="Select ${esc(c.name)}" ${SEL.has(c.name) ? "checked" : ""} onclick="event.stopPropagation();toggleSel(this.closest('tr').dataset.name, this.checked)">` : "";
@@ -794,7 +815,7 @@ async function refresh() {
                 sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
     if (d.user) nx.textContent += ` · ${d.user}`;
-    DATA = d.containers; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
+    DATA = d.containers; AUTO = d.auto_update !== false; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
     pruneSel();
     $("nav-health").hidden = !DATA.some(c => "health" in c);
     RUN = d.run; LAST = d.last_run && d.last_run.t ? d.last_run : LAST;

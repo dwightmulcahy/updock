@@ -367,3 +367,42 @@ def test_self_update_section(page, up, monkeypatch):
     expect(page.locator("#self-sec")).to_be_visible()
     expect(page.locator("#self-info")).to_contain_text("set UPDOCK_SELF")
     expect(page.locator("#self-go")).to_be_hidden()
+
+
+def _cooldown(up, monkeypatch, created):
+    monkeypatch.setattr(up.registry, "remote_info", lambda ref, platform=None: {
+        "id": "new", "digest": "sha256:newer", "tags": [], "version": "2.0.0",
+        "revision": None, "created": created})
+    up.cooldown = 86400
+    up.check_only("web")
+
+
+def test_cooldown_shown_on_row_detail_and_filter(page, up, monkeypatch):
+    from datetime import datetime, timedelta
+    _cooldown(up, monkeypatch, (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    page.reload()
+    r = row(page, "web")
+    expect(r.locator(".cool-badge")).to_have_text(re.compile(r"^cooldown · 21h 5\dm left$"))
+    expect(r.locator(".cool-badge")).to_have_attribute("title", re.compile("applied by the first scheduled run after"))
+    r.click()
+    expect(page.locator("tr.detail .cool-note")).to_contain_text(re.compile(r"in 24h cooldown · applied by the first scheduled run after .*\(21h 5\dm left\)"))
+    page.locator("#chips").get_by_role("button", name=re.compile("^Cooldown")).click()
+    expect(page.locator("#rows tr.row")).to_have_count(1)
+    expect(page.locator("#chips .chip.on .n")).to_have_text("1")
+    page.locator("#chips").get_by_role("button", name=re.compile("^All")).click()
+
+
+def test_cooldown_check_only_and_no_build_date(page, up, monkeypatch):
+    from app import main
+    _cooldown(up, monkeypatch, None)
+    page.reload()
+    r = row(page, "web")
+    expect(r.locator(".cool-badge")).to_have_text("cooldown")
+    r.click()
+    expect(page.locator("tr.detail .cool-note")).to_contain_text("no usable build date")
+    from datetime import datetime, timedelta
+    _cooldown(up, monkeypatch, (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    monkeypatch.setattr(main, "AUTO_UPDATE", False)
+    page.reload()
+    row(page, "web").click()
+    expect(page.locator("tr.detail .cool-note")).to_contain_text("scheduled runs only check this container, so update it yourself")
