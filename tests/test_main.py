@@ -963,3 +963,19 @@ def test_public_summary(client, up, health, monkeypatch):
     s = client.get("/api/public/summary").json()
     assert s["containers"] == 0 and s["unhealthy"] is None and s["last_run"] is None
     assert client.get("/api/containers").status_code == 401  # only /api/public/ is open
+
+
+def test_selected_update_skipping_cooldown(client, up, monkeypatch, caplog):
+    monkeypatch.setattr(main, "UI_PASS", "pw")
+    h = _auth("admin", "pw")
+    body = {"names": ["web", "db"], "override_cooldown": True}
+    r = client.post("/api/selected/update", json={**body, "password": "bad"}, headers=h)
+    assert r.status_code == 403
+    up.run_all.assert_not_called()
+    r = client.post("/api/selected/update", json={**body, "password": "pw"}, headers=h)
+    assert r.status_code == 202
+    up.run_all.assert_called_with(True, None, ["db", "web"], True)
+    assert "cooldown skipped for db, web by admin" in caplog.text
+    up.run_all.reset_mock()
+    client.post("/api/selected/check", json={**body, "password": "bad"}, headers=h)  # ignored
+    up.run_all.assert_called_with(False, None, ["db", "web"])

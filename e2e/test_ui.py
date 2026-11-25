@@ -409,3 +409,42 @@ def test_cooldown_check_only_and_no_build_date(page, up, monkeypatch):
     row(page, "web").click()
     expect(page.locator("tr.detail .cool-note")).to_contain_text(
         "scheduled runs only check this container, so update it yourself")
+
+
+def test_version_cell_blue_clock_in_cooldown(page, up, monkeypatch):
+    from datetime import datetime, timedelta
+    _cooldown(up, monkeypatch, (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    page.reload()
+    r = row(page, "web")
+    expect(r.locator(".ver.cool .new")).to_have_text("◷ 2.0.0")
+    expect(r.locator(".msg")).to_have_count(0)  # no stale "applying after … (in …)" text
+
+
+def test_update_selected_in_cooldown(page, up, monkeypatch):
+    from datetime import datetime, timedelta
+    _cooldown(up, monkeypatch, (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    page.reload()
+    for name in ("web", "db"):
+        row(page, name).locator("input.sel").check()
+    page.get_by_role("button", name="Update selected").click()
+    dlg = page.locator("#cdlg")
+    expect(dlg).to_contain_text("1 of 2 selected containers are in their cooldown")
+    expect(dlg).to_contain_text("web (21h")
+    expect(page.locator("#cother")).to_have_text("Update the other 1")
+    page.locator("#cgo").click()  # Update all 2 (skip cooldown); no password set
+    expect(dlg).to_be_hidden()
+    expect(row(page, "web")).to_contain_text("updated", timeout=10000)
+    assert up.d.ctrs["web"]["Image"] == "sha256:new"
+
+
+def test_update_selected_others_only(page, up, monkeypatch):
+    from datetime import datetime, timedelta
+    _cooldown(up, monkeypatch, (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    page.reload()
+    for name in ("web", "db"):
+        row(page, name).locator("input.sel").check()
+    page.get_by_role("button", name="Update selected").click()
+    page.locator("#cother").click()
+    expect(page.locator("#runbar")).to_contain_text("finished", timeout=10000)
+    assert up.d.ctrs["web"]["Image"] != "sha256:new"
+    assert up.state["db"]["job"] == "up-to-date"

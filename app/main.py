@@ -531,7 +531,7 @@ def check(request):
 
 
 UPDATE_BODY = {"override_cooldown": (bool, False), "approve": (bool, False), "password": (str, "")}
-SELECT_BODY = {"names": (list, ...)}
+SELECT_BODY = {"names": (list, ...), "override_cooldown": (bool, False), "password": (str, "")}
 PASSWORD_BODY = {"password": (str, "")}
 MAX_SELECTED = 500
 
@@ -839,8 +839,8 @@ def check_all(request):
     return bg(up.run_all, False)
 
 
-def selected_names(request):
-    names = body(request, SELECT_BODY, optional=False)["names"]
+def selected_names(data):
+    names = data["names"]
     if not names or not all(isinstance(n, str) and n.strip() for n in names):
         raise HTTPException(422, "'names' must be a non-empty list of container names")
     if len(names) > MAX_SELECTED:
@@ -851,12 +851,23 @@ def selected_names(request):
 @route("/api/selected/{action}", "POST")
 def selected_run(request):
     """Check or update the containers selected in the UI, with the rules of Update all
-    (dependencies first, cooldown, pinned/monitor-only/protected only checked)."""
+    (dependencies first, cooldown, pinned/monitor-only/protected only checked).
+    `override_cooldown` (update only; admin password when one is set) skips the cooldown
+    for the selected containers, as Update… does for one."""
     action = request.path_params["action"]
     if action not in ("check", "update"):
         raise HTTPException(404, "unknown action")
-    names = selected_names(request)
+    data = body(request, SELECT_BODY, optional=False)
+    names = selected_names(data)
+    override = action == "update" and data["override_cooldown"]
+    if override:
+        require_admin(request, data["password"], f"{len(names)} selected", "cooldown override")
     no_run_in_progress()
+    if override:
+        logging.getLogger("updock").warning(
+            "cooldown skipped for %s by %s", ", ".join(names),
+            getattr(request.state, "user", None) or "admin", extra={"event": "cooldown"})
+        return bg(up.run_all, True, None, names, True)
     return bg(up.run_all, action == "update", None, names)
 
 

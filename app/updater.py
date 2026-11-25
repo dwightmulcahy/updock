@@ -1545,10 +1545,11 @@ class Updater:
         return sorted({(c.get("Labels") or {}).get(COMPOSE_PROJECT)
                        for c in self.d.containers(all=True)} - {None, ""})
 
-    def run_all(self, update=True, project=None, names=None):
+    def run_all(self, update=True, project=None, names=None, override_cooldown=False):
         """Check (or update) every eligible container, Compose dependencies first.
         `project` limits the run to one Compose project, `names` to the containers
-        selected in the UI (stopped ones included: they were picked by hand)."""
+        selected in the UI (stopped ones included: they were picked by hand).
+        `override_cooldown` skips the cooldown (only offered for a selection)."""
         if self.run:
             self._log("a run is already in progress; request ignored", logging.WARNING,
                       event="run")
@@ -1588,7 +1589,8 @@ class Updater:
                                   name, "pin")
                         self.check_only(name, scheduled=True)
                     elif update:
-                        self.update(name, scheduled=True)
+                        self.update(name, scheduled=True, **(
+                            {"override_cooldown": True} if override_cooldown else {}))
                     else:
                         self.check_only(name, scheduled=True)
                     self.run["done"] += 1

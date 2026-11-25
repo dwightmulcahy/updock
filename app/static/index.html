@@ -18,7 +18,9 @@
   body { margin:0; font:14px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--text); }
   #top { position:sticky; top:0; z-index:40; background:var(--bg); }
   header { display:flex; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); background:var(--bg); }
-  header h1 { font-size:18px; margin:0; }
+  header h1 { font-size:24px; margin:0; display:flex; align-items:center; gap:10px; line-height:1; }
+  header h1 .logo { width:32px; height:32px; flex:0 0 32px; }
+  header h1 .version-badge { font-size:14px; }
   header .hspace { flex:1; }
   /* tabs: same look as BrewWaterSolver's page-nav */
   header { align-items:flex-end; padding-bottom:0; } header > * { margin-bottom:12px; }
@@ -84,6 +86,7 @@
   .dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; background:var(--dim); vertical-align:1px; }
   .dot.running { background:var(--ok); } .dot.unhealthy { background:var(--warn); } .dot.exited, .dot.created { background:var(--muted); }
   .ver { font-size:13px; } .ver .arrow { color:var(--warn); margin:0 4px; } .ver .new { color:var(--warn); font-weight:600; }
+  .ver.cool .arrow, .ver.cool .new { color:var(--cool); }
   .ver .same { color:var(--ok); margin-left:4px; } .ver .unk { color:var(--dim); font-style:italic; }
   .msg { color:var(--err); font-size:12px; margin-top:3px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   .msg.info { color:var(--dim); }
@@ -241,7 +244,7 @@
 <body>
 <div id="top">
 <header>
-  <h1>Updock <span class="meta version-badge" id="ver" role="button" tabindex="0" aria-haspopup="dialog" title="Build info"></span></h1>
+  <h1><svg class="logo" viewBox="0 0 96 96" aria-hidden="true"><rect x="8" y="68" width="24" height="18" rx="3" fill="#cbd5e1"/><rect x="36" y="68" width="24" height="18" rx="3" fill="#64748b"/><rect x="36" y="47" width="24" height="18" rx="3" fill="#64748b"/><rect x="64" y="68" width="24" height="18" rx="3" fill="#0D9488"/><rect x="64" y="47" width="24" height="18" rx="3" fill="#0D9488"/><rect x="64" y="26" width="24" height="18" rx="3" fill="#0D9488"/><path d="M62 18 L76 6 L90 18" fill="none" stroke="#0D9488" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>Updock <span class="meta version-badge" id="ver" role="button" tabindex="0" aria-haspopup="dialog" title="Build info"></span></h1>
   <nav class="page-nav" aria-label="Sections">
     <a href="#containers" data-tab="containers">Containers</a>
     <a href="#logs" data-tab="logs">Logs</a>
@@ -372,6 +375,7 @@
     <input id="cpass" type="password" placeholder="Updock password (the one you sign in with)" autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore hidden>
     <div class="meta" id="cmsg" role="status"></div>
     <div class="row"><button type="button" onclick="cdlg.close()">Cancel</button>
+      <button type="button" id="cother" hidden onclick="updateOthers()"></button>
       <button class="primary danger" type="submit" id="cgo">Update anyway</button></div>
   </form>
 </dialog>
@@ -537,6 +541,8 @@ function versionCell(c) {
   const l = c.latest;
   if (c.update_available && l) {
     const nv = l.note ? `<span class="unk" title="${esc(l.note)}">newer image</span>` : (verText(l, c.target_ref || c.image) || '<span class="unk">newer</span>');
+    if (inCooldown(c))
+      return `<div class="ver cool" title="${esc(coolText(c))}">${cur}<span class="arrow">→</span><span class="new">◷ ${nv}</span></div>`;
     return `<div class="ver">${cur}<span class="arrow">→</span><span class="new">${nv}</span></div>`;
   }
   if (!c.update_available && ["up-to-date", "updated"].includes(c.job))
@@ -549,7 +555,8 @@ function statusText(c) {
   if (c.job === "pulling" && c.progress != null) return { badge: `pulling ${c.progress}%`, cls: "pulling" };
   const job = c.job || (c.pinned || c.monitor_only ? "" : "unchecked");
   const badge = (job || "unchecked").replaceAll("-", " ");
-  const show = PROBLEM.has(job) || ["cooldown", "skipped", "reverted", "approval"].includes(job);
+  const show = PROBLEM.has(job) || (["cooldown", "skipped", "reverted", "approval"].includes(job) &&
+                                    !(job === "cooldown" && inCooldown(c)));
   return { badge, cls: job, msg: show ? c.message : "", info: !PROBLEM.has(job) };
 }
 // icon + colour for the status shown left of the container name
@@ -612,7 +619,7 @@ function detailRow(c) {
       ${c.project ? `<div class="img">Compose: ${esc(c.project)} / ${esc(c.service || "?")}</div>` : ""}
       <div class="img">last check ${ago(c.last_check)}${c.last_update ? ` · last update ${ago(c.last_update)}` : ""}</div>
       ${flags.map(f => `<div class="img">${esc(f)}</div>`).join("")}</div>
-    ${c.message ? `<div class="dfull ${PROBLEM.has(c.job) ? "err" : ""}">${esc(c.message)}</div>` : ""}
+    ${c.message && !(c.job === "cooldown" && inCooldown(c)) ? `<div class="dfull ${PROBLEM.has(c.job) ? "err" : ""}">${esc(c.message)}</div>` : ""}
   </div></td></tr>`;
 }
 function attention(c) {
@@ -1018,17 +1025,51 @@ $("selall").addEventListener("click", ev => {
   });
   render(); renderSel();
 });
+let SEL_NAMES = [], SEL_OTHERS = [];
 async function runSelected(kind) {
   const names = [...SEL];
-  if (!names.length || (kind === "update" && !confirm(`Update ${names.length} selected container(s) that have a newer image?`))) return;
-  optimistic = { kind, selected: names.length, total: names.length, done: 0, current: null, started: Date.now() / 1000 };
-  renderRun();
+  if (!names.length) return;
+  if (kind === "update") {
+    const cooled = DATA.filter(c => SEL.has(c.name) && inCooldown(c));
+    if (cooled.length) return openSelectedCooldown(names, cooled);
+    if (!confirm(`Update ${names.length} selected container(s) that have a newer image?`)) return;
+  }
+  return startSelected(kind, names, {});
+}
+// POST the selection; returns the Response so the dialog can show password errors
+async function startSelected(kind, names, extra) {
   const r = await fetch(`/api/selected/${kind}`, { method: "POST",
-    headers: { "Content-Type": "application/json", "X-Updock-Request": "1" }, body: JSON.stringify({ names }) });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.detail || `Failed (${r.status})`); }
-  else clearSel();
-  setTimeout(() => { optimistic = null; renderRun(); }, 1500);
-  setTimeout(refresh, 300);
+    headers: { "Content-Type": "application/json", "X-Updock-Request": "1" }, body: JSON.stringify({ names, ...extra }) });
+  if (r.ok) {
+    optimistic = { kind, selected: names.length, total: names.length, done: 0, current: null, started: Date.now() / 1000 };
+    renderRun(); clearSel();
+    setTimeout(() => { optimistic = null; renderRun(); }, 1500);
+    setTimeout(refresh, 300);
+  } else if (!extra.override_cooldown) {
+    const d = await r.json().catch(() => ({})); alert(d.detail || `Failed (${r.status})`);
+  }
+  return r;
+}
+// some selected containers are in their cooldown: Update selected would skip them (as
+// Update all does), so say so and offer to update the others or to skip the cooldown too
+function openSelectedCooldown(names, cooled) {
+  COOL_MODE = "selected"; SEL_NAMES = names;
+  const cn = new Set(cooled.map(c => c.name));
+  SEL_OTHERS = names.filter(n => !cn.has(n));
+  const left = c => c.cooldown.until ? ` (${leftText(c.cooldown.until - Date.now() / 1000)})` : " (no build date)";
+  $("ctitle").textContent = cooled.length === names.length
+    ? `All ${names.length} selected ${names.length === 1 ? "container is" : "containers are"} in their cooldown`
+    : `${cooled.length} of ${names.length} selected containers are in their cooldown`;
+  $("ctext").textContent = `${cooled.map(c => c.name + left(c)).join(", ")}. Update selected leaves these alone, like Update all. ` +
+    "The cooldown gives broken or compromised releases time to be noticed and pulled before they reach you; updating now skips that safety margin.";
+  $("cother").hidden = !SEL_OTHERS.length;
+  $("cother").textContent = `Update the other ${SEL_OTHERS.length}`;
+  $("cgo").textContent = `Update all ${names.length} (skip cooldown)`;
+  gateDialog();
+}
+async function updateOthers() {
+  $("cdlg").close();
+  await startSelected("update", SEL_OTHERS, {});
 }
 const _render = render;
 render = function () { _render(); renderSel(); };
@@ -1179,6 +1220,7 @@ function gateDialog() {
 // ---- approving a version step beyond updock.allow / UPDOCK_ALLOW ----
 function openApproval(name) {
   const c = DATA.find(x => x.name === name); if (!c || !c.approval) return;
+  $("cother").hidden = true;
   COOL_NAME = name; COOL_MODE = "approval";
   const a = c.approval;
   $("ctitle").textContent = `Approve ${name} ${a.from} → ${a.to}?`;
@@ -1190,7 +1232,7 @@ function openApproval(name) {
 }
 function openCooldown(name) {
   const c = DATA.find(x => x.name === name); if (!c || !c.cooldown) return;
-  COOL_NAME = name; COOL_MODE = "cooldown"; $("cgo").textContent = "Update anyway";
+  COOL_NAME = name; COOL_MODE = "cooldown"; $("cgo").textContent = "Update anyway"; $("cother").hidden = true;
   const l = c.latest || {}, built = l.created ? new Date(l.created) : null;
   const age = built ? Math.max(0, Date.now() - built.getTime()) / 3600000 : null;
   const until = c.cooldown.until ? new Date(c.cooldown.until * 1000).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : null;
@@ -1211,7 +1253,9 @@ async function overrideCooldown(ev) {
   try { await sendOverride(); } finally { $("cgo").disabled = false; }
 }
 async function sendOverride() {
-  const r = await fetch(`/api/containers/${encodeURIComponent(COOL_NAME)}/update`, {
+  const r = COOL_MODE === "selected"
+    ? await startSelected("update", SEL_NAMES, { override_cooldown: true, password: $("cpass").value })
+    : await fetch(`/api/containers/${encodeURIComponent(COOL_NAME)}/update`, {
     method: "POST", headers: { "X-Updock-Request": "1", "Content-Type": "application/json" },
     body: JSON.stringify(COOL_MODE === "approval" ? { approve: true, password: $("cpass").value } : { override_cooldown: true, password: $("cpass").value }) });
   if (r.status === 403 || r.status === 429) { $("cmsg").textContent = passwordError(r, await r.json().catch(() => ({}))); $("cpass").select(); return; }
