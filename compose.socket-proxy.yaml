@@ -3,7 +3,7 @@
 # (QNAP: -f compose.qnap.yaml -f compose.socket-proxy.yaml)
 #
 # Only the proxy mounts the socket (read-only). Updock reaches it over an internal network
-# and can only use the API sections enabled below. See "Docker socket proxy" in README.md.
+# and can only use the API sections enabled below. See docs/security.md and docs/socket-proxy.md.
 services:
   socket-proxy:
     image: lscr.io/linuxserver/socket-proxy:${SOCKET_PROXY_TAG:-latest}
