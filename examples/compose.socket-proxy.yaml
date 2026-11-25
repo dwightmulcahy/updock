@@ -1,6 +1,6 @@
 # Run Updock through a Docker socket proxy instead of giving it the Docker socket:
-#   docker compose -f compose.yaml -f compose.socket-proxy.yaml up -d
-# (QNAP: -f compose.qnap.yaml -f compose.socket-proxy.yaml)
+#   docker compose -f compose.yaml -f examples/compose.socket-proxy.yaml up -d
+# (QNAP: -f compose.qnap.yaml -f examples/compose.socket-proxy.yaml)
 #
 # Only the proxy mounts the socket (read-only). Updock reaches it over an internal network
 # and can only use the API sections enabled below. See docs/security.md and docs/socket-proxy.md.

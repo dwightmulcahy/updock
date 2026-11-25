@@ -93,7 +93,7 @@ def test_env_example_references_secret_files():
 
 def test_socket_proxy_override_removes_socket_from_updock():
     import yaml
-    doc = yaml.safe_load(open(os.path.join(ROOT, "compose.socket-proxy.yaml")).read()
+    doc = yaml.safe_load(open(os.path.join(ROOT, "examples/compose.socket-proxy.yaml")).read()
                          .replace("!override", ""))
     proxy, updock = doc["services"]["socket-proxy"], doc["services"]["updock"]
     assert proxy["labels"]["updock.enable"] == "false"
