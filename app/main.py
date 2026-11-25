@@ -1,18 +1,18 @@
 import base64
-from collections import defaultdict, deque
 import inspect
 import ipaddress
 import json
-import random
-import re
 import logging
 import os
 import platform
+import random
+import re
 import secrets
 import threading
 import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,28 +22,25 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import (FileResponse, JSONResponse, PlainTextResponse, Response,
-                                 StreamingResponse)
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from . import docker_api
+from . import events as eventsmod
+from . import logs as logmod
 from . import metrics as metricsmod
 from .config import load_env
-from . import docker_api
 from .docker_api import Docker, normalize_registry
-from .logins import RegistryLogins, display_host
-from .registry import RegistryAuthError
 from .events import EventHub
 from .health import HealthMonitor
-from . import events as eventsmod
+from .logins import RegistryLogins, display_host
 from .notify import EmailNotifier
-from .registry import Registry
+from .registry import Registry, RegistryAuthError
 from .schedule import Cron, Window, parse_duration
 from .selfupdate import SelfUpdateError, SelfUpdater
 from .store import Store
 from .units import parse_size, parse_threshold
 from .updater import Updater, protected_message
-
-from . import logs as logmod
 
 LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_LOG_FORMAT", "text"),
                       int(os.getenv("UPDOCK_LOG_BUFFER", "2000")))
@@ -57,10 +54,10 @@ AUTO_UPDATE = env_bool("UPDOCK_AUTO_UPDATE", True)  # false = scheduled check on
 def _tz(name):
     from zoneinfo import ZoneInfo
     try:
-        return ZoneInfo(name) if name else timezone.utc
+        return ZoneInfo(name) if name else UTC
     except Exception:
         logging.getLogger("updock").warning("unknown TZ %r, using UTC", name)
-        return timezone.utc
+        return UTC
 
 
 TZ = _tz(os.getenv("TZ", "").strip())

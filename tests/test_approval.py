@@ -1,12 +1,12 @@
 """Version-step approval: updock.allow / UPDOCK_ALLOW."""
 import pytest
+import test_semver
+from conftest import IMG_CFG, OLD_IMG, make_ctr
+from test_semver import TagRegistry, semver_ctr
+from test_updater import DigestRegistry, RecNotifier, publish_new
 
 from app import semver
 from app.updater import Updater
-from conftest import IMG_CFG, OLD_IMG, make_ctr
-import test_semver
-from test_semver import TagRegistry, semver_ctr
-from test_updater import DigestRegistry, RecNotifier, publish_new
 
 
 @pytest.mark.parametrize("old,new,want", [

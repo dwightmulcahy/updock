@@ -3,11 +3,11 @@ import os
 import subprocess
 
 import pytest
+from conftest import IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 from app import cosign
 from app.cosign import SignatureError, policy_args
 from app.updater import Updater
-from conftest import IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 
 def test_policy_args():

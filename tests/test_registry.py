@@ -1,5 +1,6 @@
 import base64
 import json
+from datetime import UTC
 
 import httpx
 import pytest
@@ -275,8 +276,8 @@ from app.registry import RateLimited, retry_after_seconds  # noqa: E402
     ("Wed, 21 Oct 2015 07:20:00 GMT", 0),       # in the past
 ])
 def test_retry_after_seconds(value, expected):
-    from datetime import datetime, timezone
-    now = datetime(2015, 10, 21, 7, 27, tzinfo=timezone.utc).timestamp()
+    from datetime import datetime
+    now = datetime(2015, 10, 21, 7, 27, tzinfo=UTC).timestamp()
     assert retry_after_seconds(value, now) == expected
 
 

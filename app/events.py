@@ -55,7 +55,7 @@ async def stream(hub, q, is_disconnected, heartbeat=15):
         while not await is_disconnected():
             try:
                 item = await asyncio.wait_for(q.get(), heartbeat)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield ": ping\n\n"
                 continue
             yield format_event(item)

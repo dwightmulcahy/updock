@@ -2,10 +2,10 @@ import json
 from contextlib import contextmanager
 
 import pytest
+from conftest import make_ctr
 
 from app.health import HealthMonitor, health_of
 from app.updater import Updater
-from conftest import make_ctr
 
 
 class Notifier:
@@ -193,7 +193,7 @@ def test_history_persisted_and_pruned(env, tmp_path):
     clock.t += 7200
     again.tick()
     assert all(e["t"] >= clock.t - 3600 for e in again.history)
-    assert [json.loads(l)["t"] for l in path.read_text().splitlines()] == [e["t"] for e in again.history]
+    assert [json.loads(line)["t"] for line in path.read_text().splitlines()] == [e["t"] for e in again.history]
 
 
 def test_history_write_errors_ignored(env, tmp_path, caplog):

@@ -1,9 +1,9 @@
 import pytest
+from conftest import IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 from app import semver
 from app.registry import RateLimited, RegistryAuthError, RegistryError
 from app.updater import Updater
-from conftest import IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
 TAGS = ["latest", "2.0.0", "1.5.0", "1.4.10", "1.4.9-alpine", "1.4.3", "1.4.2", "1.4",
         "v1.9.9", "1.4.11-rc1", "1.3.0"]

@@ -415,7 +415,7 @@ On Docker Hub, the version list and `updock.semver` read tags from Docker Hub's 
 
 ```bash
 pip install -r requirements-dev.txt   # hashed lock: exact versions only
-ruff check . --select F && pyflakes app scripts tests
+ruff check .
 pytest                     # fails if coverage < 90%
 ```
 

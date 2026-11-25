@@ -2,11 +2,11 @@ import json
 from contextlib import contextmanager
 
 import pytest
+from conftest import CID, IMG_CFG, NEW_IMG, make_ctr
 
 from app import selfupdate as su
 from app.selfupdate import SelfUpdateError, SelfUpdater, run_helper
-from app.updater import Updater, UnhealthyError
-from conftest import CID, IMG_CFG, NEW_IMG, make_ctr
+from app.updater import UnhealthyError, Updater
 
 
 class Notifier:

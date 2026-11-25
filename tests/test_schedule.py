@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -6,7 +6,7 @@ import pytest
 from app import schedule
 from app.schedule import Cron, Window, parse_field
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def dt(*a, tz=UTC):
