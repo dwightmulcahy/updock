@@ -2545,3 +2545,12 @@ def test_dependent_failure_skips_rollback_hooks(kup, fake):
     with pytest.raises(RuntimeError):
         kup._recreate(fake.inspect("app"), cleanup=False, network_parent="p" * 64, start=True)
     assert fake.execs == []
+
+
+def test_run_all_selected_override_cooldown(up, fake, monkeypatch):
+    fake.add(make_ctr())
+    seen = []
+    monkeypatch.setattr(up, "update", lambda n, scheduled=False, **kw: seen.append((n, kw)))
+    up.run_all(update=True, names=["web"], override_cooldown=True)
+    up.run_all(update=True, names=["web"])
+    assert seen == [("web", {"override_cooldown": True}), ("web", {})]

@@ -13,7 +13,7 @@
 | Registry details for one tag | `GET /api/containers/{name}/tags/{tag}` |
 | Pin / unpin | `POST /api/containers/{name}/pin?pinned=true\|false` |
 | Check / update all | `POST /api/check-all`, `POST /api/update-all` |
-| Check / update selected | `POST /api/selected/check`, `POST /api/selected/update` with `{"names": [...]}` |
+| Check / update selected | `POST /api/selected/check`, `POST /api/selected/update` with `{"names": [...]}`; add `"override_cooldown": true, "password": "…"` to skip the cooldown |
 | Health monitor | `GET /api/health`, `GET /api/health/history`, `POST /api/health/check` |
 | Self-update | `GET /api/self`, `POST /api/self/check`, `POST /api/self/update` |
 | Counts for dashboards | `GET /api/public/summary` (no login with `UPDOCK_PUBLIC_API=true`) |
