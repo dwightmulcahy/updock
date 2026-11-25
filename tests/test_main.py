@@ -1,6 +1,7 @@
-import json
 import base64
+import json
 import logging
+from datetime import UTC
 from unittest.mock import MagicMock
 
 import pytest
@@ -198,21 +199,22 @@ def test_scheduler_survives_errors(up, monkeypatch):
 
 
 def test_scheduler_cron_times(up, monkeypatch):
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from app.schedule import Cron
-    monkeypatch.setattr(main, "TZ", timezone.utc)
+    monkeypatch.setattr(main, "TZ", UTC)
     ft, calls = _run_scheduler(monkeypatch, runs=2, cron=Cron("30 4 * * *"))
-    times = [datetime.fromtimestamp(t, timezone.utc) for t in calls[:2]]
+    times = [datetime.fromtimestamp(t, UTC) for t in calls[:2]]
     assert [(x.hour, x.minute) for x in times] == [(4, 30), (4, 30)]
     assert calls[1] - calls[0] == 86400
 
 
 def test_scheduled_run_window(up, monkeypatch):
-    from datetime import timezone
+
     from app.schedule import Window
-    monkeypatch.setattr(main, "TZ", timezone.utc)
+    monkeypatch.setattr(main, "TZ", UTC)
     monkeypatch.setattr(main, "AUTO_UPDATE", True)
-    hour = __import__("datetime").datetime.now(timezone.utc).hour
+    hour = __import__("datetime").datetime.now(UTC).hour
     monkeypatch.setattr(main, "WINDOW", Window(f"{hour:02d}:00-{(hour + 1) % 24:02d}:00"))
     main.scheduled_run()
     up.run_all.assert_called_with(True)
@@ -481,7 +483,7 @@ def test_events_endpoint(client, monkeypatch):
 
 
 def test_next_due_jitter(monkeypatch):
-    from datetime import timezone
+
     from app.schedule import Cron
     monkeypatch.setattr(main, "CRON", None)
     monkeypatch.setattr(main, "INTERVAL", 100)
@@ -489,7 +491,7 @@ def test_next_due_jitter(monkeypatch):
     monkeypatch.setattr(main.random, "uniform", lambda a, b: b)
     assert main.next_due(1000) == 1130
     monkeypatch.setattr(main, "CRON", Cron("0 0 * * *"))
-    monkeypatch.setattr(main, "TZ", timezone.utc)
+    monkeypatch.setattr(main, "TZ", UTC)
     assert main.next_due(0) == 86400 + 30
     monkeypatch.setattr(main, "JITTER", 0)
     assert main.next_due(0) == 86400
@@ -760,9 +762,9 @@ def test_admin_password_throttled_after_repeated_failures(client, up, monkeypatc
 # ---------- web layer (Starlette) ----------
 
 def test_json_encoding_of_sets_dates_paths():
-    from datetime import datetime, timezone
+    from datetime import datetime
     from pathlib import Path
-    out = main.JSON({"s": {1}, "t": (2,), "d": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    out = main.JSON({"s": {1}, "t": (2,), "d": datetime(2026, 1, 2, tzinfo=UTC),
                      "p": Path("/x"), "u": "é"}).body
     assert json.loads(out) == {"s": [1], "t": [2], "d": "2026-01-02T00:00:00+00:00", "p": "/x",
                                "u": "é"}

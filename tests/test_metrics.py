@@ -1,8 +1,9 @@
 import re
 
+from conftest import make_ctr
+
 from app import metrics
 from app.updater import Updater
-from conftest import make_ctr
 
 
 def parse(text):

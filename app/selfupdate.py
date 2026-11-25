@@ -266,7 +266,7 @@ class _Collect(logging.Handler):
 
 def run_helper(argv, docker=None, updater_cls=None, env=None):
     from .docker_api import Docker
-    from .updater import Updater, UnhealthyError, image_info
+    from .updater import UnhealthyError, Updater, image_info
     env = os.environ if env is None else env
     if len(argv) != 2:
         print("usage: python -m app.selfupdate <container> <image ref>", file=sys.stderr)

@@ -2,3 +2,14 @@
 testpaths = ["tests"]
 pythonpath = [".", "tests"]
 addopts = "--cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "UP"]
+ignore = ["E731"]  # small lambdas assigned to names are used deliberately
+
+[tool.ruff.lint.per-file-ignores]
+"app/email_render.py" = ["E501"]  # inline-styled HTML email markup

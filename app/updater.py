@@ -15,10 +15,11 @@ from .changelog import TEMPLATE_LABEL, changelog_url, source_of
 from .docker_api import DockerError, registry_credentials, split_ref
 from .logs import LogBuffer
 from .notify import EmailNotifier
-from .registry import (REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError,
-                       RegistryError, parse_repo)
-from .semver import LEVELS, SEMVER_LABEL, best as semver_best, exceeds, jump, parse as semver_parse
+from .registry import REVISION_LABELS, VERSION_LABELS, RateLimited, RegistryAuthError, RegistryError, parse_repo
 from .schedule import format_duration, parse_duration, parse_timestamp
+from .semver import LEVELS, SEMVER_LABEL, exceeds, jump
+from .semver import best as semver_best
+from .semver import parse as semver_parse
 from .units import format_size
 
 ENABLE_LABEL = "updock.enable"
@@ -166,7 +167,7 @@ def build_create_body(ctr, old_img_cfg, image_ref=None):
     hc = dict(ctr["HostConfig"])
     if hc.get("Links"):  # inspect: "/db:/web/alias" -> create: "db:alias"
         hc["Links"] = [f"{s.lstrip('/')}:{d.rsplit('/', 1)[-1]}"
-                       for s, d in (l.split(":", 1) for l in hc["Links"])]
+                       for s, d in (link.split(":", 1) for link in hc["Links"])]
 
     # Re-attach anonymous volumes so their data survives.
     targets = {b.split(":")[1] for b in hc.get("Binds") or [] if ":" in b}
@@ -1205,7 +1206,7 @@ class Updater:
                 self.d.start(new_id)
                 self._log("started", logging.DEBUG, name, "recreate")
                 self._verify(new_id, name, was_unhealthy=(
-                    ((ctr["State"].get("Health") or {}).get("Status") == "unhealthy")))
+                    (ctr["State"].get("Health") or {}).get("Status") == "unhealthy"))
                 if not network_parent:
                     self._verify_url(new_id, name)
         except Exception as e:

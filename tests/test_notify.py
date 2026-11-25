@@ -136,7 +136,8 @@ def test_test_email_raises_on_failure():
     FakeSMTP.fail = None
     mk().test()
     m = FakeSMTP.instances[-1].sent[0]
-    assert "Test email from Updock" in m.get_body(("plain",)).get_content() and m["Subject"] == "[updock] nas: test email"
+    assert "Test email from Updock" in m.get_body(("plain",)).get_content()
+    assert m["Subject"] == "[updock] nas: test email"
     assert m["Date"] and m["Message-ID"].endswith("@updock>")
 
 

@@ -3,7 +3,7 @@
 Email clients ignore <style> blocks and most modern CSS, so the HTML uses tables and
 inline styles only, and every value is escaped."""
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import escape
 
 TITLES = {"update": "updated", "rollback": "rolled back", "error": "failed",
@@ -43,7 +43,7 @@ def ago(created, now=None):
     if d is None:
         return ""
     if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
+        d = d.replace(tzinfo=UTC)
     secs = (now or time.time()) - d.timestamp()
     if secs < 0:
         rel = "in the future"

@@ -70,10 +70,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - name: Ruff and Pyflakes
-        run: |
-          ruff check . --select F
-          pyflakes app scripts tests
+      - name: Ruff
+        run: ruff check .
       - run: python -m pytest -q
 
   e2e:

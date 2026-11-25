@@ -1,11 +1,10 @@
-import time
 import logging
+import time
 
 import pytest
-
-from app.updater import Updater, base_repo, build_create_body, compose_depends, compose_order, image_info
 from conftest import CID, IMG_CFG, NEW_IMG, OLD_IMG, make_ctr
 
+from app.updater import Updater, base_repo, build_create_body, compose_depends, compose_order, image_info
 
 # ---------- build_create_body ----------
 
@@ -1201,7 +1200,7 @@ def test_deploy_reports_pull_progress(up, fake):
 
 def _iso(age_s):
     import datetime as dt
-    t = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_s)
+    t = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=age_s)
     return t.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 

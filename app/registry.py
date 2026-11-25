@@ -4,14 +4,14 @@ import logging
 import re
 import ssl
 import time
-from datetime import timezone
+from datetime import UTC
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
 
-from .docker_api import registry_credentials, registry_identity_token, split_ref
 from .changelog import source_of
+from .docker_api import registry_credentials, registry_identity_token, split_ref
 from .schedule import format_duration
 
 log = logging.getLogger("updock")
@@ -76,7 +76,7 @@ def retry_after_seconds(value, now=None):
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+        when = when.replace(tzinfo=UTC)
     now = now if now is not None else time.time()
     return max(0, int(when.timestamp() - now))
 

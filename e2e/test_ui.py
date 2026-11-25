@@ -1,4 +1,5 @@
 import re
+from datetime import UTC
 
 from playwright.sync_api import expect
 
@@ -184,10 +185,10 @@ def test_project_groups_collapse_and_expand(page):
 
 
 def test_cooldown_needs_confirmation_and_password(page, up, monkeypatch):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from app import main
-    fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     monkeypatch.setattr(up.registry, "remote_info", lambda ref, platform=None: {
         "id": "new", "digest": "sha256:newer", "tags": [], "version": "2.0.0",
         "revision": None, "created": fresh})
