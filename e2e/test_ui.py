@@ -383,9 +383,11 @@ def test_cooldown_shown_on_row_detail_and_filter(page, up, monkeypatch):
     page.reload()
     r = row(page, "web")
     expect(r.locator(".cool-badge")).to_have_text(re.compile(r"^cooldown · 21h 5\dm left$"))
-    expect(r.locator(".cool-badge")).to_have_attribute("title", re.compile("applied by the first scheduled run after"))
+    expect(r.locator(".cool-badge")).to_have_attribute(
+        "title", re.compile("applied by the first scheduled run after"))
     r.click()
-    expect(page.locator("tr.detail .cool-note")).to_contain_text(re.compile(r"in 24h cooldown · applied by the first scheduled run after .*\(21h 5\dm left\)"))
+    expect(page.locator("tr.detail .cool-note")).to_contain_text(
+        re.compile(r"in 24h cooldown · applied by the first scheduled run after .*\(21h 5\dm left\)"))
     page.locator("#chips").get_by_role("button", name=re.compile("^Cooldown")).click()
     expect(page.locator("#rows tr.row")).to_have_count(1)
     expect(page.locator("#chips .chip.on .n")).to_have_text("1")
@@ -405,4 +407,5 @@ def test_cooldown_check_only_and_no_build_date(page, up, monkeypatch):
     monkeypatch.setattr(main, "AUTO_UPDATE", False)
     page.reload()
     row(page, "web").click()
-    expect(page.locator("tr.detail .cool-note")).to_contain_text("scheduled runs only check this container, so update it yourself")
+    expect(page.locator("tr.detail .cool-note")).to_contain_text(
+        "scheduled runs only check this container, so update it yourself")
