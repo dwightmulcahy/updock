@@ -44,7 +44,7 @@ def test_release_publishes_protected_semver_aliases():
     assert "type=raw,value=latest" in workflow
     for alias in ("publish_major", "publish_minor", "is_latest"):
         assert workflow.count(f"needs.verify.outputs.{alias} == 'true'") == 1
-    assert "scripts/generate_release_notes.py" in workflow
+    assert "python -m scripts.generate_release_notes" in workflow
 
 
 def test_workflows_do_not_set_info_zip_option_env_vars():

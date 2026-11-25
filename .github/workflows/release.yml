@@ -101,7 +101,7 @@ jobs:
       - id: built
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Bundle release notes for the "What's new" dialog
-        run: python scripts/build_changelog.py --upto "${{ github.ref_name }}" --repository "${{ github.repository }}" --output app/changelog.json
+        run: python -m scripts.build_changelog --upto "${{ github.ref_name }}" --repository "${{ github.repository }}" --output app/changelog.json
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -140,7 +140,7 @@ jobs:
           fetch-depth: 0
       - name: Generate conventional release notes
         run: >-
-          python scripts/generate_release_notes.py
+          python -m scripts.generate_release_notes
           --tag "${{ github.ref_name }}"
           --project-name "${{ github.event.repository.name }}"
           --image "${{ needs.verify.outputs.image }}"

@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from generate_release_notes import CONVENTIONAL_COMMIT, SECTIONS, commit_subjects, git, previous_tag, version_tuple  # noqa: E402
+from scripts.generate_release_notes import (
+    CONVENTIONAL_COMMIT,
+    SECTIONS,
+    commit_subjects,
+    git,
+    previous_tag,
+    version_tuple,
+)
 
 # What a user notices; the rest is counted as "internal changes"
 USER_FACING = ("feat", "fix", "perf", "security", "revert")
