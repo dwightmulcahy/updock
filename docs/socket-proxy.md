@@ -10,7 +10,7 @@ network. The proxy only passes the parts of the Docker API that Updock needs.
  browser ──► updock :8080 ──(internal network)──► socket-proxy :2375 ──► docker.sock (ro)
 ```
 
-Everything is set up by `compose.socket-proxy.yaml`, an override that you combine with your
+Everything is set up by `examples/compose.socket-proxy.yaml`, an override that you combine with your
 normal Compose file.
 
 ## 1. Start it
@@ -19,19 +19,19 @@ Run both Compose files together:
 
 ```bash
 # normal setup (builds locally)
-docker compose -f compose.yaml -f compose.socket-proxy.yaml up -d
+docker compose -f compose.yaml -f examples/compose.socket-proxy.yaml up -d
 
 # QNAP / published image
-docker compose -f compose.qnap.yaml -f compose.socket-proxy.yaml pull
-docker compose -f compose.qnap.yaml -f compose.socket-proxy.yaml up -d
+docker compose -f compose.qnap.yaml -f examples/compose.socket-proxy.yaml pull
+docker compose -f compose.qnap.yaml -f examples/compose.socket-proxy.yaml up -d
 ```
 
 Use the same two `-f` flags for **every** later `docker compose` command too (`pull`,
 `down`, `logs`, …). To avoid typing them, add this to `.env`:
 
 ```dotenv
-COMPOSE_FILE=compose.yaml:compose.socket-proxy.yaml
-# QNAP: COMPOSE_FILE=compose.qnap.yaml:compose.socket-proxy.yaml
+COMPOSE_FILE=compose.yaml:examples/compose.socket-proxy.yaml
+# QNAP: COMPOSE_FILE=compose.qnap.yaml:examples/compose.socket-proxy.yaml
 ```
 
 After that, a plain `docker compose up -d` uses both files.
@@ -86,7 +86,7 @@ blocked by the Docker socket proxy; enable SYSTEM=1 (GET /system/df)
 
 - `EXEC` or `SYSTEM`: set `SOCKET_PROXY_EXEC=1` / `SOCKET_PROXY_SYSTEM=1` in `.env`.
 - Anything else: add it to the `environment:` section of the `socket-proxy` service in
-  `compose.socket-proxy.yaml`.
+  `examples/compose.socket-proxy.yaml`.
 
 Then run `docker compose up -d` again.
 

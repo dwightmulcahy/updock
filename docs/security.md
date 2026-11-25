@@ -5,7 +5,7 @@
 Instead of mounting the Docker socket into Updock, you can put a [socket proxy](https://github.com/linuxserver/docker-socket-proxy) in front of it:
 
 ```bash
-docker compose -f compose.yaml -f compose.socket-proxy.yaml up -d
+docker compose -f compose.yaml -f examples/compose.socket-proxy.yaml up -d
 ```
 
 Only the proxy mounts the socket (read-only); Updock talks to it over an internal network (`DOCKER_HOST=tcp://socket-proxy:2375`), and the proxy refuses every API section Updock doesn't need — volumes, builds, swarm, secrets, plugins, system-wide changes. The proxy is labelled `updock.enable=false` so Updock never stops the proxy it depends on.
