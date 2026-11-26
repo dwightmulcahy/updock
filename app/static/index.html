@@ -103,6 +103,12 @@
   #menu button:hover:not(:disabled) { background:var(--line); filter:none; }
   #menu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
   .empty { padding:28px; text-align:center; color:var(--dim); }
+  /* schedule strip under the header: next run, window, disk, signed-in user */
+  #schedbar { display:flex; align-items:center; gap:10px; padding:7px 24px; font-size:13px; background:var(--info-bg);
+              border-bottom:1px solid var(--run-line); border-left:4px solid var(--accent); }
+  #schedbar #next { font-weight:600; color:var(--text); } #schedbar .sb-icon { color:var(--accent); font-size:15px; line-height:1; }
+  #schedbar .hspace { flex:1; }
+  #schedbar.off { background:var(--panel); border-left-color:var(--muted); } #schedbar.off #next { color:var(--dim); font-weight:400; }
   #runbar { display:flex; align-items:center; gap:12px; padding:10px 24px; background:var(--run-bg); border-bottom:1px solid var(--run-line); font-size:13px; }
   #runbar[hidden] { display:none; }
   #runbar.done { background:var(--done-bg); border-color:var(--done-line); }
@@ -234,6 +240,7 @@
     tr.detail, tr.grp { display:block; } tr.detail td, tr.grp td { display:block; border-bottom:1px solid var(--line); }
     tr.grp { display:flex; } tr.grp td { border:0; } tr.grp td:first-child { flex:1; }
     .msg { max-width:none; }
+    #schedbar { padding:6px 12px; flex-wrap:wrap; }
     #runbar { padding:8px 12px; flex-wrap:wrap; } #runbar .rb-bar { flex:1 0 100%; }
     .le { grid-template-columns:auto 1fr; } .le .c, .le .ev { display:none; }
     .hlist .he { grid-template-columns:1fr 1fr; }
@@ -252,13 +259,12 @@
     <a href="#about" data-tab="about">About</a>
   </nav>
   <span class="hspace"></span>
-  <span class="meta" id="disk" hidden></span>
-  <span class="meta" id="next"></span>
   <button id="btn-check-all" onclick="startRun('check')" title="Check every container for a newer image">Check all</button>
   <button id="btn-update-all" class="primary" onclick="confirm('Update every container that has a newer image?') && startRun('update')">Update all</button>
   <button class="more" onclick="headerMenu(event)" title="More" aria-label="More">⋯</button>
   <button id="testmail" hidden onclick="testEmail()">Test email</button>
 </header>
+<div id="schedbar"><span class="sb-icon" aria-hidden="true">◷</span><span id="next"></span><span class="hspace"></span><span class="meta" id="disk" hidden></span><span class="meta" id="whoami" hidden></span></div>
 <div id="runbar" hidden role="status" aria-live="polite"></div>
 </div>
 <main>
@@ -821,7 +827,8 @@ async function refresh() {
     nx.title = [sc.cron ? `cron "${sc.cron}" (${sc.tz})` : sc.interval ? `every ${sc.interval}s` : "",
                 sc.window ? `updates only ${sc.window} (${sc.tz})` : ""].filter(Boolean).join(" · ");
     if (sc.window && d.next_run) nx.textContent += ` · window ${sc.window}`;
-    if (d.user) nx.textContent += ` · ${d.user}`;
+    $("schedbar").classList.toggle("off", !d.next_run);
+    $("whoami").hidden = !d.user; $("whoami").textContent = d.user ? `signed in as ${d.user}` : "";
     DATA = d.containers; AUTO = d.auto_update !== false; GATE = d.cooldown_gate || "confirm"; ALLOW_DELETE = d.allow_delete !== false;
     pruneSel();
     $("nav-health").hidden = !DATA.some(c => "health" in c);
