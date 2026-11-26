@@ -20,6 +20,20 @@ def test_lists_containers_and_filters(page):
     expect(page.locator("tr.row")).to_have_count(4)
 
 
+def test_schedule_strip_sits_below_the_header(page, monkeypatch):
+    from app import main
+    bar = page.locator("#schedbar")
+    expect(bar).to_have_text(re.compile("Schedule off"))
+    expect(bar).to_have_class(re.compile("off"))
+    assert page.locator("header #next").count() == 0
+    monkeypatch.setitem(main.next_run, "t", 1893456000)
+    page.reload()
+    expect(bar.locator("#next")).to_have_text(re.compile(r"^Next update: "))
+    expect(bar).not_to_have_class(re.compile("off"))
+    hdr, strip = page.locator("header").bounding_box(), bar.bounding_box()
+    assert strip["y"] >= hdr["y"] + hdr["height"] - 1
+
+
 def test_check_all_shows_progress_and_summary(page):
     page.click("#btn-check-all")
     expect(page.locator("#runbar")).to_contain_text("finished", timeout=10000)
