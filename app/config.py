@@ -60,7 +60,7 @@ KNOWN = frozenset((
     "UPDOCK_SMTP_PORT", "UPDOCK_SMTP_SECURITY", "UPDOCK_SMTP_TO", "UPDOCK_SMTP_USER",
     "UPDOCK_STARTUP_GRACE", "UPDOCK_TRUSTED_PROXIES", "UPDOCK_URL", "UPDOCK_USER",
     "UPDOCK_WINDOW",
-)) | {f"{n}_FILE" for n in SECRET_NAMES}
+)) | {f"{n}_FILE" for n in SECRET_NAMES} | {"UPDOCK_ENV_FILE"}
 
 
 def clean_env(env=None):

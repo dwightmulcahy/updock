@@ -979,3 +979,91 @@ def test_selected_update_skipping_cooldown(client, up, monkeypatch, caplog):
     up.run_all.reset_mock()
     client.post("/api/selected/check", json={**body, "password": "bad"}, headers=h)  # ignored
     up.run_all.assert_called_with(False, None, ["db", "web"])
+
+
+# ---------- Settings tab ----------
+
+@pytest.fixture
+def envf(tmp_path, monkeypatch):
+    f = tmp_path / "updock.env"
+    f.write_text("# mine\nUPDOCK_CLEANUP=true\nEXEC=0\n")
+    monkeypatch.setattr(main, "ENV_FILE", str(f))
+    monkeypatch.setattr(main, "STORE", MagicMock(dir=str(tmp_path)))
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    monkeypatch.setattr(main.SELF, "container", lambda: {"Id": "self123"})
+    return f
+
+
+def _set(client, path, payload=None, password="s3cret"):
+    return client.post(path, headers=_auth("admin", "s3cret"), json={"password": password, **(payload or {})})
+
+
+def test_settings_info(client, envf, monkeypatch):
+    assert client.get("/api/settings", headers=_auth("admin", "s3cret")).json() == {
+        "available": True, "file": str(envf), "why": "", "password_set": True}
+    monkeypatch.setattr(main, "ENV_FILE", "")
+    assert main.settings_status() == (False, "", "UPDOCK_ENV_FILE is not set")
+    monkeypatch.setattr(main, "ENV_FILE", str(envf) + ".missing")
+    assert "does not exist" in main.settings_status()[2]
+    monkeypatch.setattr(main, "ENV_FILE", str(envf))
+    monkeypatch.setattr(main.os, "access", lambda *a: False)
+    assert "not writable" in main.settings_status()[2]
+
+
+def test_settings_need_the_admin_password(client, envf, monkeypatch, caplog):
+    r = _set(client, "/api/settings/open", password="nope")
+    assert r.status_code == 403 and "settings open refused" in caplog.text
+    monkeypatch.setattr(main, "UI_PASS", "")
+    r = client.post("/api/settings/open", json={})
+    assert r.status_code == 403 and "set UPDOCK_PASSWORD" in r.json()["detail"]
+    monkeypatch.setattr(main, "API_TOKEN", "tok")
+    r = client.post("/api/settings/open", headers={"Authorization": "Bearer tok"}, json={})
+    assert r.status_code == 200
+    monkeypatch.setattr(main, "ENV_FILE", "")
+    r = client.post("/api/settings/open", headers={"Authorization": "Bearer tok"}, json={})
+    assert r.status_code == 409 and r.json()["detail"] == "UPDOCK_ENV_FILE is not set"
+
+
+def test_settings_open_lists_file_and_running_values(client, envf, monkeypatch):
+    monkeypatch.setenv("UPDOCK_CLEANUP", "false")
+    d = _set(client, "/api/settings/open").json()
+    assert d["file"] == str(envf) and d["restart"] is True
+    item = next(i for i in d["items"] if i["key"] == "UPDOCK_CLEANUP")
+    assert item == {"key": "UPDOCK_CLEANUP", "group": "Updates and safety", "kind": "bool", "default": "true",
+                    "help": item["help"], "value": "true", "current": "false", "saved": False}
+
+
+def test_settings_save_validates_writes_and_records(client, envf, caplog):
+    r = _set(client, "/api/settings/save", {"values": {"UPDOCK_CLEANUP": "maybe", "UPDOCK_PASSWORD": "x",
+                                                       "UPDOCK_INTERVAL": 5}})
+    assert r.status_code == 422
+    assert r.json()["detail"] == ("UPDOCK_CLEANUP: use true or false; UPDOCK_INTERVAL: must be a string; "
+                                  "UPDOCK_PASSWORD: not editable here")
+    assert envf.read_text() == "# mine\nUPDOCK_CLEANUP=true\nEXEC=0\n"
+    r = _set(client, "/api/settings/save", {"values": {"UPDOCK_CLEANUP": None, "UPDOCK_ALLOW": " minor ",
+                                                       "UPDOCK_URL": "", "UPDOCK_JITTER": None}})
+    assert r.json() == {"changed": ["UPDOCK_ALLOW", "UPDOCK_CLEANUP"], "restart": True}
+    assert envf.read_text() == "# mine\nEXEC=0\n\n# set from the Updock Settings tab\nUPDOCK_ALLOW=minor\n"
+    assert "settings changed by admin: UPDOCK_ALLOW, UPDOCK_CLEANUP; restart Updock to apply" in caplog.text
+    d = _set(client, "/api/settings/open").json()
+    assert next(i for i in d["items"] if i["key"] == "UPDOCK_ALLOW")["saved"] is True
+    assert _set(client, "/api/settings/save", {"values": {"UPDOCK_ALLOW": "minor"}}).json()["changed"] == []
+    assert client.post("/api/settings/save", headers=_auth("admin", "s3cret")).status_code == 403
+
+
+def test_settings_save_without_store(client, envf, monkeypatch):
+    monkeypatch.setattr(main, "STORE", None)
+    assert _set(client, "/api/settings/open").json()["items"][0]["saved"] is False
+    r = _set(client, "/api/settings/save", {"values": {"UPDOCK_ALLOW": "patch"}})
+    assert r.json()["changed"] == ["UPDOCK_ALLOW"]
+
+
+def test_settings_restart(client, envf, up, monkeypatch, caplog):
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    r = _set(client, "/api/settings/restart")
+    assert r.status_code == 202 and r.json() == {"status": "restarting"}
+    up.d.restart.assert_called_once_with("self123")
+    assert "restart requested by admin" in caplog.text
+    monkeypatch.setattr(main.SELF, "container", lambda: None)
+    r = _set(client, "/api/settings/restart")
+    assert r.status_code == 409 and "restart it yourself" in r.json()["detail"]

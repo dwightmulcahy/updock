@@ -42,6 +42,7 @@ Values are trimmed (trailing spaces or a Windows line ending in an env file are 
 | `UPDOCK_ALLOW_DELETE` | `true` | Allow **Delete container…** in the UI/API |
 | `UPDOCK_ALLOWED_ORIGINS` | empty | Extra allowed browser origins, comma-separated (e.g. `https://updock.example.com`) |
 | `UPDOCK_DATA_DIR` | `/data` | Where state and log history are stored |
+| `UPDOCK_ENV_FILE` | empty | Path of your env file inside the container (mounted read-write) to edit settings in the [Settings tab](ui.md#settings) |
 | `UPDOCK_METRICS_PUBLIC` | `false` | Serve `/metrics` without login |
 | `UPDOCK_LOG_LEVEL` | `INFO` | `DEBUG` adds pull timings and each recreate step |
 | `UPDOCK_LOG_FORMAT` | `text` | `json` for one JSON object per line on stdout |
