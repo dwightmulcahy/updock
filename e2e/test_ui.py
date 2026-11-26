@@ -478,6 +478,7 @@ def test_about_get_in_touch(page):
     sec.get_by_role("button", name="Previous project").click()
     expect(title).to_have_text(first)
     expect(page.locator("#featuredLink")).to_have_attribute("href", f"https://github.com/dwightmulcahy/{first}")
-    expect(sec.get_by_role("link", name="dWiGhT.Codes@gmail.com")).to_have_attribute("href", "mailto:dWiGhT.Codes@gmail.com")
+    expect(sec.get_by_role("link", name="dWiGhT.Codes@gmail.com")).to_have_attribute(
+        "href", "mailto:dWiGhT.Codes@gmail.com")
     expect(sec.get_by_role("link", name="Container Images")).to_have_attribute(
         "href", "https://github.com/dwightmulcahy/updock/pkgs/container/updock")
