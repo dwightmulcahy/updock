@@ -1,5 +1,7 @@
 # Configuration
 
+Values are trimmed (trailing spaces or a Windows line ending in an env file are ignored). An `UPDOCK_*` variable Updock doesn't know is logged at startup as `unknown setting … is ignored`, with the closest known name when one is similar, so a typo doesn't silently leave a feature off.
+
 | Var | Default | |
 |---|---|---|
 | `UPDOCK_SCHEDULE` | empty | Cron expression for scheduled runs, e.g. `30 4 * * *` or `@daily` (overrides `UPDOCK_INTERVAL`) |

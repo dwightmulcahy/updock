@@ -110,3 +110,30 @@ def test_socket_proxy_override_removes_socket_from_updock():
 ])
 def test_images_published_for_arm_v7(path, key):
     assert key in open(os.path.join(ROOT, path)).read()
+
+
+def test_known_covers_every_setting_the_code_reads():
+    import re
+    from pathlib import Path
+
+    used = set()
+    for py in (Path(__file__).parents[1] / "app").glob("*.py"):
+        used |= set(re.findall(r'"(UPDOCK_[A-Z0-9_]+)"', py.read_text()))
+    assert used - config.KNOWN == set()
+
+
+def test_clean_env_strips_values_and_flags_typos():
+    env = {"UPDOCK_ALLOW_SELF_UPDATE": "true\r", "UPDOCK_SELF_UPDATE": "true", "UPDOCK_CLEANUP": " yes ",
+           "UPDOCK_ZZZQQQ": "1", "UPDOCK_PASSWORD_FILE": "/run/x", "PATH": " /bin "}
+    unknown = config.clean_env(env)
+    assert env["UPDOCK_ALLOW_SELF_UPDATE"] == "true" and env["UPDOCK_CLEANUP"] == "yes"
+    assert env["PATH"] == " /bin "  # only UPDOCK_* values are touched
+    assert unknown == [("UPDOCK_SELF_UPDATE", "UPDOCK_ALLOW_SELF_UPDATE"), ("UPDOCK_ZZZQQQ", None)]
+
+
+def test_warn_unknown_logs_one_line_each(caplog):
+    with caplog.at_level("WARNING", logger="updock"):
+        config.warn_unknown([("UPDOCK_SELF_UPDATE", "UPDOCK_ALLOW_SELF_UPDATE"), ("UPDOCK_X", None)])
+    assert [r.getMessage() for r in caplog.records] == [
+        "unknown setting UPDOCK_SELF_UPDATE is ignored; did you mean UPDOCK_ALLOW_SELF_UPDATE?",
+        "unknown setting UPDOCK_X is ignored"]

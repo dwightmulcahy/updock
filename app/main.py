@@ -29,7 +29,7 @@ from . import docker_api
 from . import events as eventsmod
 from . import logs as logmod
 from . import metrics as metricsmod
-from .config import load_env
+from .config import clean_env, load_env, warn_unknown
 from .docker_api import Docker, normalize_registry
 from .events import EventHub
 from .health import HealthMonitor
@@ -42,8 +42,11 @@ from .store import Store
 from .units import parse_size, parse_threshold
 from .updater import Updater, protected_message
 
+UNKNOWN_SETTINGS = clean_env()  # before anything reads UPDOCK_*
 LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_LOG_FORMAT", "text"),
                       int(os.getenv("UPDOCK_LOG_BUFFER", "2000")))
+
+warn_unknown(UNKNOWN_SETTINGS)
 
 env_bool = lambda k, d: os.getenv(k, str(d)).lower() in ("1", "true", "yes")
 env_list = lambda k: [x.strip() for x in os.getenv(k, "").split(",") if x.strip()]
