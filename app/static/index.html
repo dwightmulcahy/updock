@@ -276,6 +276,17 @@
   .contact-icon-email, .contact-icon-linkedin { color:var(--accent); } .contact-icon-github { color:var(--contact-purple); }
   .contact-icon-docker { color:var(--contact-docker); }
   @media (max-width:700px) { .contact-grid { grid-template-columns:1fr; } .contact-section { padding:1.5rem 1.2rem; } }
+  /* Settings tab */
+  .set-why { margin:8px 0; padding:10px 12px; border-radius:8px; background:var(--warn-bg); color:var(--text); font-size:13px; }
+  .set-why pre { margin:8px 0 0; font-size:12px; white-space:pre; overflow:auto; }
+  .set-group { padding:12px 22px 6px; } .set-group legend { font-size:16px; font-weight:600; color:var(--accent); padding:0 6px; }
+  .set-row { display:grid; grid-template-columns:minmax(220px, max-content) minmax(180px, 320px) 1fr; gap:4px 14px; align-items:start; padding:7px 0; border-top:1px solid var(--line); }
+  .set-row:first-of-type { border-top:0; } .set-row label code { font-size:12px; }
+  .set-row input, .set-row select { width:100%; box-sizing:border-box; } .set-row .dirty { outline:2px solid var(--warn); }
+  .set-help { font-size:12px; color:var(--dim); line-height:1.4; } .set-running { display:block; color:var(--warn); }
+  .err-text { color:var(--err-text); margin-left:8px; } .set-err { display:block; margin-left:0; } .set-actions { position:sticky; bottom:0; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:12px 0; background:var(--bg); border-top:1px solid var(--line); max-width:900px; }
+  @media (max-width:760px) { .set-row { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -286,6 +297,7 @@
     <a href="#containers" data-tab="containers">Containers</a>
     <a href="#logs" data-tab="logs">Logs</a>
     <a href="#health" data-tab="health" id="nav-health" hidden>Health</a>
+    <a href="#settings" data-tab="settings">Settings</a>
     <a href="#about" data-tab="about">About</a>
   </nav>
   <span class="hspace"></span>
@@ -356,6 +368,26 @@
     <select id="hctr" title="Container" onchange="loadHealth()"><option value="">All containers</option></select>
     <div id="health-hist" class="hlist" style="margin-top:8px"></div></div>
 </section>
+<section class="tab" id="tab-settings" hidden>
+  <div class="doc-section" id="set-head">
+    <h2>Settings</h2>
+    <p>Change Updock's <code>UPDOCK_*</code> settings here. They are written to <code id="set-file">the env file</code> and take effect when Updock restarts. Secrets (passwords, tokens) stay in their secret files.</p>
+    <div id="set-why" class="set-why" hidden></div>
+    <form id="set-unlock" class="row" hidden onsubmit="event.preventDefault(); openSettings()">
+      <input type="password" id="set-pass" placeholder="Admin password" autocomplete="current-password" aria-label="Admin password">
+      <button class="primary" type="submit">Unlock</button><span class="err-text" id="set-msg" role="alert"></span>
+    </form>
+  </div>
+  <form id="set-form" hidden onsubmit="event.preventDefault(); saveSettings()">
+    <div id="set-groups"></div>
+    <div class="set-actions">
+      <button class="primary" type="submit" id="set-save" disabled>Save</button>
+      <button type="button" onclick="lockSettings()">Lock</button>
+      <span id="set-status" role="status" aria-live="polite"></span>
+      <button type="button" id="set-restart" hidden onclick="restartUpdock()">Restart Updock now</button>
+    </div>
+  </form>
+</section>
 <section class="tab" id="tab-about" hidden>
   <div class="doc-section">
     <h2>What Updock does</h2>
@@ -367,7 +399,7 @@
     <div class="row" style="margin-top:8px"><button onclick="selfCheck()" id="self-check">Check for a new Updock</button>
       <button class="primary" id="self-go" hidden onclick="openSelfUpdate()">Self-update…</button></div></div>
   <div class="doc-section"><h2>Settings in effect</h2><dl class="kv" id="about-settings"></dl>
-    <p class="meta" style="margin-top:10px">Set with <code>UPDOCK_*</code> environment variables; see the README for all of them.</p></div>
+    <p class="meta" style="margin-top:10px">Set with <code>UPDOCK_*</code> environment variables (or the <a href="#settings">Settings</a> tab); see the README for all of them.</p></div>
   <div class="doc-section">
     <h2>Links</h2>
     <ul>
@@ -1255,13 +1287,98 @@ async function selfUpdate(ev) {
 }
 fetch("/api/containers").then(r => r.json()).then(d => { if (d.self_update) loadSelf(); }).catch(() => {});
 
+// ---- Settings tab: edit the env file (admin password; nothing kept after Lock/reload) ----
+let SET = null, SET_PASS = "";
+async function loadSettingsInfo() {
+  if (SET) return;
+  const i = await fetch("/api/settings").then(r => r.json()).catch(() => ({ available: false, why: "Updock didn't answer" }));
+  $("set-file").textContent = i.file || "the env file";
+  const why = !i.available ? i.why : !i.password_set ? "Set UPDOCK_PASSWORD (the admin password) to edit settings here." : "";
+  $("set-why").hidden = !why;
+  $("set-why").innerHTML = why ? esc(why) + (!i.available ? `<br>To enable it, mount your env file into the container and point Updock at it:
+    <pre>volumes:\n  - /share/Data/config/updock/updock.env:/config/updock.env\nenvironment:\n  UPDOCK_ENV_FILE: /config/updock.env</pre>` : "") : "";
+  $("set-unlock").hidden = !!why;
+  if (!why) $("set-pass").focus();
+}
+async function setPost(path, payload) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Updock-Request": "1" },
+                                body: JSON.stringify({ password: SET_PASS, ...payload }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+  return d;
+}
+async function openSettings() {
+  SET_PASS = $("set-pass").value; $("set-msg").textContent = "";
+  try { SET = await setPost("/api/settings/open", {}); }
+  catch (e) { SET_PASS = ""; $("set-msg").textContent = e.message; return; }
+  $("set-pass").value = ""; $("set-unlock").hidden = true; $("set-form").hidden = false;
+  renderSettings();
+}
+function lockSettings() {
+  SET = null; SET_PASS = ""; $("set-form").hidden = true; $("set-groups").innerHTML = "";
+  $("set-status").textContent = ""; $("set-restart").hidden = true; loadSettingsInfo();
+}
+function settingInput(it) {
+  const v = it.value ?? "", id = `set-${it.key}`;
+  const opts = it.kind === "bool" ? ["true", "false"] : it.kind.startsWith("choice:") ? it.kind.slice(7).split(",") : null;
+  if (opts) return `<select id="${id}" data-key="${it.key}" data-orig="${esc(v)}"><option value="">default${it.default ? ` (${esc(it.default)})` : ""}</option>` +
+    opts.map(o => `<option${o.toLowerCase() === v.toLowerCase() ? " selected" : ""}>${esc(o)}</option>`).join("") + "</select>";
+  return `<input id="${id}" data-key="${it.key}" data-orig="${esc(v)}" value="${esc(v)}" placeholder="${esc(it.default ? `default: ${it.default}` : "not set")}" autocomplete="off" spellcheck="false">`;
+}
+function renderSettings() {
+  const groups = [...new Set(SET.items.map(i => i.group))];
+  $("set-groups").innerHTML = groups.map(g => `<fieldset class="doc-section set-group"><legend>${esc(g)}</legend>` +
+    SET.items.filter(i => i.group === g).map(it => {
+      const running = (it.current ?? "") !== (it.value ?? "") ? `<span class="meta set-running">running with: ${esc(it.current ?? "default")}</span>` : "";
+      return `<div class="set-row"><label for="set-${it.key}"><code>${it.key}</code></label>${settingInput(it)}<div class="set-help">${esc(it.help)} ${running}<span class="err-text set-err" id="set-err-${it.key}"></span></div></div>`;
+    }).join("") + "</fieldset>").join("");
+  $("set-groups").oninput = $("set-groups").onchange = markDirty;
+  markDirty();
+}
+function settingFields() { return [...document.querySelectorAll("#set-groups [data-key]")]; }
+function markDirty() {
+  let n = 0;
+  for (const el of settingFields()) { const d = el.value.trim() !== el.dataset.orig; el.classList.toggle("dirty", d); n += d; }
+  $("set-save").disabled = !n; $("set-save").textContent = n ? `Save ${n} change${n === 1 ? "" : "s"}` : "Save";
+}
+async function saveSettings() {
+  const values = {};
+  for (const el of settingFields()) if (el.value.trim() !== el.dataset.orig) values[el.dataset.key] = el.value.trim() || null;
+  document.querySelectorAll(".set-err").forEach(e => e.textContent = "");
+  $("set-status").textContent = "Saving…";
+  try {
+    const r = await setPost("/api/settings/save", { values });
+    SET = await setPost("/api/settings/open", {}); renderSettings();
+    $("set-status").textContent = r.changed.length ? `Saved ${r.changed.join(", ")}. Restart Updock to apply.` : "Nothing changed.";
+    $("set-restart").hidden = !(r.changed.length && r.restart);
+  } catch (e) {
+    $("set-status").textContent = "Not saved.";
+    for (const part of e.message.split("; ")) {
+      const m = part.match(/^([A-Z_]+): (.*)$/), el = m && $(`set-err-${m[1]}`);
+      if (el) el.textContent = m[2]; else $("set-status").textContent = `Not saved: ${e.message}`;
+    }
+  }
+}
+async function restartUpdock() {
+  if (!confirm("Restart Updock now to apply the saved settings? Running jobs are interrupted.")) return;
+  try { await setPost("/api/settings/restart", {}); } catch (e) { $("set-status").textContent = e.message; return; }
+  $("set-restart").hidden = true; $("set-status").textContent = "Restarting… the page reloads when Updock is back.";
+  await new Promise(r => setTimeout(r, 3000));
+  for (let i = 0; i < 60; i++) {
+    if (await fetch("/livez").then(r => r.ok).catch(() => false)) { location.reload(); return; }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  $("set-status").textContent = "Updock hasn't come back yet; check the container.";
+}
+
 // ---- tabs (Containers / Logs / Health / About), kept in the URL hash ----
-const TABS = ["containers", "logs", "health", "about"];
+const TABS = ["containers", "logs", "health", "settings", "about"];
 function showTab() {
   const t = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "containers";
   for (const n of TABS) $(`tab-${n}`).hidden = n !== t;
   document.querySelectorAll(".page-nav a").forEach(a =>
     a.dataset.tab === t ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+  if (t === "settings") loadSettingsInfo();
   if (t === "about") { loadAbout(); loadSelf(); showFeaturedProject(Math.floor(Math.random() * FEATURED_PROJECTS.length)); }
   if (t === "health") loadHealth();
   if (t === "logs") $("logs").scrollTop = 0;

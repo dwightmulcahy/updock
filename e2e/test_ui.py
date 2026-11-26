@@ -482,3 +482,46 @@ def test_about_get_in_touch(page):
         "href", "mailto:dWiGhT.Codes@gmail.com")
     expect(sec.get_by_role("link", name="Container Images")).to_have_attribute(
         "href", "https://github.com/dwightmulcahy/updock/pkgs/container/updock")
+
+
+def test_settings_tab_edits_the_env_file(page, up, monkeypatch, tmp_path):
+    from app import main
+    envf = tmp_path / "updock.env"
+    envf.write_text("UPDOCK_CLEANUP=true\nEXEC=0\n")
+    monkeypatch.setattr(main, "ENV_FILE", str(envf))
+    monkeypatch.setattr(main, "UI_PASS", "s3cret")
+    monkeypatch.setattr(main.SELF, "container", lambda: {"Id": "self"})
+    page.context.set_extra_http_headers({"Authorization": "Basic YWRtaW46czNjcmV0"})
+    page.goto(page.url.split("#")[0] + "#settings")
+    page.fill("#set-pass", "wrong")
+    page.get_by_role("button", name="Unlock").click()
+    expect(page.locator("#set-msg")).to_have_text("wrong admin password")
+    page.fill("#set-pass", "s3cret")
+    page.get_by_role("button", name="Unlock").click()
+    expect(page.locator("#set-form")).to_be_visible()
+    expect(page.locator("#set-save")).to_be_disabled()
+    page.select_option("#set-UPDOCK_ALLOW", "minor")
+    page.fill("#set-UPDOCK_SCHEDULE", "99 * * * *")
+    expect(page.locator("#set-save")).to_have_text("Save 2 changes")
+    page.locator("#set-save").click()
+    expect(page.locator("#set-err-UPDOCK_SCHEDULE")).to_contain_text("invalid")
+    assert envf.read_text() == "UPDOCK_CLEANUP=true\nEXEC=0\n"
+    page.fill("#set-UPDOCK_SCHEDULE", "0 4 * * *")
+    page.locator("#set-save").click()
+    expect(page.locator("#set-status")).to_have_text("Saved UPDOCK_ALLOW, UPDOCK_SCHEDULE. Restart Updock to apply.")
+    expect(page.locator("#set-restart")).to_be_visible()
+    saved = envf.read_text()
+    assert "UPDOCK_ALLOW=minor\n" in saved and 'UPDOCK_SCHEDULE="0 4 * * *"\n' in saved
+    expect(page.locator("#set-save")).to_be_disabled()
+    page.get_by_role("button", name="Lock").click()
+    expect(page.locator("#set-form")).to_be_hidden()
+    expect(page.locator("#set-unlock")).to_be_visible()
+
+
+def test_settings_tab_explains_how_to_enable_it(page, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "ENV_FILE", "")
+    page.goto(page.url.split("#")[0] + "#settings")
+    expect(page.locator("#set-why")).to_contain_text("UPDOCK_ENV_FILE is not set")
+    expect(page.locator("#set-why pre")).to_contain_text("UPDOCK_ENV_FILE: /config/updock.env")
+    expect(page.locator("#set-unlock")).to_be_hidden()

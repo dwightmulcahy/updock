@@ -25,7 +25,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from . import docker_api
+from . import docker_api, envfile
 from . import events as eventsmod
 from . import logs as logmod
 from . import metrics as metricsmod
@@ -42,11 +42,15 @@ from .store import Store
 from .units import parse_size, parse_threshold
 from .updater import Updater, protected_message
 
+# Settings saved from the Settings tab take effect at the next start (see envfile.py)
+ENV_FILE = os.getenv("UPDOCK_ENV_FILE", "").strip()
+SETTINGS_APPLIED = envfile.apply(ENV_FILE, os.getenv("UPDOCK_DATA_DIR", "/data"))
 UNKNOWN_SETTINGS = clean_env()  # before anything reads UPDOCK_*
 LOGBUF = logmod.setup(os.getenv("UPDOCK_LOG_LEVEL", "INFO"), os.getenv("UPDOCK_LOG_FORMAT", "text"),
                       int(os.getenv("UPDOCK_LOG_BUFFER", "2000")))
 
 warn_unknown(UNKNOWN_SETTINGS)
+envfile.announce(SETTINGS_APPLIED, ENV_FILE)
 
 env_bool = lambda k, d: os.getenv(k, str(d)).lower() in ("1", "true", "yes")
 env_list = lambda k: [x.strip() for x in os.getenv(k, "").split(",") if x.strip()]
@@ -916,6 +920,100 @@ def self_update(request):
                                         getattr(request.state, "user", None) or "admin",
                                         extra={"event": "self-update"})
     return bg(SELF.start_safely)
+
+
+# ---------- Settings tab: edit the env file (admin only) ----------
+SETTINGS_BODY = {"password": (str, ""), "values": (dict, None)}
+
+
+def settings_status():
+    """Can the Settings tab edit the env file? (ok, file, why-not)"""
+    if not ENV_FILE:
+        return False, "", "UPDOCK_ENV_FILE is not set"
+    if not os.path.isfile(ENV_FILE):
+        return False, ENV_FILE, f"{ENV_FILE} does not exist (mount the env file there)"
+    if not os.access(ENV_FILE, os.R_OK | os.W_OK):
+        return False, ENV_FILE, f"{ENV_FILE} is not writable (mount it without :ro)"
+    return True, ENV_FILE, ""
+
+
+def settings_admin(request, data, action):
+    """The admin password is required even when the UI itself has no login; an API token
+    also counts."""
+    if not UI_PASS and not getattr(request.state, "token", False):
+        raise HTTPException(403, "set UPDOCK_PASSWORD (the admin password) to use Settings")
+    require_admin(request, (data or {}).get("password", ""), "updock", action)
+    ok, _, why = settings_status()
+    if not ok:
+        raise HTTPException(409, why)
+
+
+@route("/api/settings", "GET")
+def settings_info(_):
+    ok, path, why = settings_status()
+    return {"available": ok, "file": path, "why": why, "password_set": bool(UI_PASS)}
+
+
+@route("/api/settings/open", "POST")
+def settings_open(request):
+    data = body(request, SETTINGS_BODY)
+    settings_admin(request, data, "settings open")
+    values = envfile.parse(envfile.read(ENV_FILE))
+    saved = envfile.recorded(STORE.dir) if STORE else set()
+    items = [{"key": k, "group": g, "kind": kind, "default": d, "help": h, "value": values.get(k),
+              "current": os.environ.get(k), "saved": k in saved} for k, g, kind, d, h in envfile.SETTINGS]
+    return {"file": ENV_FILE, "items": items, "restart": SELF.container() is not None}
+
+
+@route("/api/settings/save", "POST")
+def settings_save(request):
+    data = body(request, SETTINGS_BODY, optional=False)
+    settings_admin(request, data, "settings save")
+    values = data["values"] or {}
+    errors = {}
+    for key, value in values.items():
+        if value is not None and not isinstance(value, str):
+            errors[key] = "must be a string"
+            continue
+        why = envfile.check(key, (value or "").strip())
+        if why:
+            errors[key] = why
+    if errors:
+        raise HTTPException(422, "; ".join(f"{k}: {v}" for k, v in sorted(errors.items())))
+    text = envfile.read(ENV_FILE)
+    old = envfile.parse(text)
+    changes = {}
+    for key, value in values.items():
+        value = (value or "").strip() or None  # empty = remove = default
+        if old.get(key) != value and not (value is None and key not in old):
+            changes[key] = value
+    if changes:
+        envfile.write(ENV_FILE, envfile.render(text, changes))
+        if STORE:
+            envfile.record(STORE.dir, changes)
+        logging.getLogger("updock").warning(
+            "settings changed by %s: %s; restart Updock to apply",
+            getattr(request.state, "user", None) or "admin", ", ".join(sorted(changes)),
+            extra={"event": "config"})
+    return {"changed": sorted(changes), "restart": SELF.container() is not None}
+
+
+@route("/api/settings/restart", "POST")
+def settings_restart(request):
+    data = body(request, SETTINGS_BODY)
+    settings_admin(request, data, "restart")
+    ctr = SELF.container()
+    if ctr is None:
+        raise HTTPException(409, "can't find Updock's own container; restart it yourself")
+    logging.getLogger("updock").warning("restart requested by %s to apply settings",
+                                        getattr(request.state, "user", None) or "admin",
+                                        extra={"event": "config"})
+
+    def later():
+        time.sleep(1)  # let the response reach the browser first
+        up.d.restart(ctr["Id"])
+    threading.Thread(target=later, daemon=True).start()
+    return JSON({"status": "restarting"}, 202)
 
 
 SUMMARY_TTL = 15

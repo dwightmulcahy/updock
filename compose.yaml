@@ -12,6 +12,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - updock-data:/data
+      # Settings tab: mount your env file read-write and set UPDOCK_ENV_FILE=/config/updock.env
+      # - ./.env:/config/updock.env
       # Private registries: mount your docker login config
       # - ~/.docker/config.json:/config/config.json:ro
     secrets: [updock_password, updock_api_token, updock_smtp_password]
