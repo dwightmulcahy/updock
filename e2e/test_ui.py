@@ -462,3 +462,22 @@ def test_update_selected_others_only(page, up, monkeypatch):
     expect(page.locator("#runbar")).to_contain_text("finished", timeout=10000)
     assert up.d.ctrs["web"]["Image"] != "sha256:new"
     assert up.state["db"]["job"] == "up-to-date"
+
+
+def test_about_get_in_touch(page):
+    page.goto(page.url.split("#")[0] + "#about")
+    sec = page.locator("#contact")
+    expect(sec.get_by_role("heading", name="Get in Touch")).to_be_visible()
+    expect(sec).to_contain_text("Explore active projects & developer credentials.")
+    title = page.locator("#featuredTitle")
+    first = title.inner_text()
+    count = page.locator("#featuredCount")
+    expect(count).to_have_text(re.compile(r"^\d+ / \d+$"))
+    sec.get_by_role("button", name="Next project").click()
+    expect(title).not_to_have_text(first)
+    sec.get_by_role("button", name="Previous project").click()
+    expect(title).to_have_text(first)
+    expect(page.locator("#featuredLink")).to_have_attribute("href", f"https://github.com/dwightmulcahy/{first}")
+    expect(sec.get_by_role("link", name="dWiGhT.Codes@gmail.com")).to_have_attribute("href", "mailto:dWiGhT.Codes@gmail.com")
+    expect(sec.get_by_role("link", name="Container Images")).to_have_attribute(
+        "href", "https://github.com/dwightmulcahy/updock/pkgs/container/updock")
