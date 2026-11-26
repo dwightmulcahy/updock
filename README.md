@@ -40,7 +40,7 @@ curl http://localhost:8080/health
 
 Published image: `ghcr.io/dwightmulcahy/updock`, for `linux/amd64`, `linux/arm64` and `linux/arm/v7` (32-bit Raspberry Pi OS, older ARM NAS boxes).
 
-QNAP: `docker compose -f compose.qnap.yaml pull && docker compose -f compose.qnap.yaml up -d`
+QNAP: `docker compose -f compose.qnap.yaml pull && docker compose -f compose.qnap.yaml up -d` (Container Station doesn't accept `mem_limit` in the YAML; set the memory limit, 256 MB, in the app's **Advanced** settings)
 
 Both Compose files run with a read-only root filesystem, all capabilities
 dropped, `no-new-privileges`, bounded memory/PIDs, an init process, a graceful

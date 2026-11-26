@@ -23,7 +23,8 @@ services:
     cap_add: [DAC_READ_SEARCH]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 200
-    mem_limit: 256m
+    # Memory limit: Container Station rejects mem_limit in the YAML; set 256 MB in the
+    # app's Advanced settings (Resources) instead.
     shm_size: 64m
     stop_signal: SIGTERM
     stop_grace_period: 30s
